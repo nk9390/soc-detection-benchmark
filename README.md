@@ -16,7 +16,7 @@ A containerized security monitoring lab built to evaluate detection rules agains
 
 - **Observed** means at least one indexed log document matched the technique's keywords inside its collection window. It is not a confirmed detection: no detection rule ran and no alert was raised. The evidence files record this outcome as `"result": "DETECTED"`.
 - **Log-availability latency** is the `@timestamp` of the first matching document (assigned by Filebeat when it reads the log line) minus the attack start time (taken from the harness clock on the host). Earlier versions called this "TTD"; the code and evidence files still name the field `mean_time_to_detect_seconds`. The two clocks were not compared.
-- **Not evaluated** means the technique was executed only in four early full-manifest runs, which reported 0 of 12 tests observed before the harness was corrected, and was not run again.
+- **Not evaluated** means the technique was executed only in four early full-manifest runs, which reported 0 of 12 tests observed before the harness was corrected, and was not run again. It does not mean "evaluated and not detected". The recorded reports from those runs (`results/report_20261010_*.md`) list all 11 techniques under "Detection Gaps" with a 0% detection rate; those labels came from the faulty harness and are not valid results for any technique. The T1053.003 run with the 15-second window is a different case: it ran under the corrected harness, the attack and the query both succeeded, and nothing matched. The stored documents show that no log source wrote any event in that window, so the run shows that the evidence arrived too late for a 15-second window; it does not show that the keyword query missed evidence that was present. Its evidence file records `NOT_DETECTED`; the current harness would label it `NOT EVALUATED`.
 
 **Matching method:** Keyword-based Elasticsearch queries (not Sigma rule evaluation). The Sigma files in `rules/sigma/` are not loaded by the harness.
 
@@ -89,11 +89,11 @@ print(f'Success: {results[0].success}')
 | **Log-availability latency** | `@timestamp` of the first matching document minus attack start time (code field: `mean_time_to_detect_seconds`) |
 | **Collection Window** | Time range searched for matching documents: 1s before the attack starts to 15s after it ends (65s for T1053.003) |
 
-**Note:** False positive rate requires a baseline workload run, which was not performed. Generated reports print `0.0/hour` in that case; read it as "not measured". Each reported result is a single observation, so no rates or averages across runs are available.
+**Note:** No valid false positive measurement exists. The four early reports record `0.0/hour`, but the artifacts do not establish whether a baseline workload ran or whether that value was a default; at the time the harness also printed zero when no baseline was supplied or a query failed. The harness now prints "N/A (not measured)" in those cases. Each reported result is a single observation, so no rates or averages across runs are available.
 
 ## Key Findings
 
-1. **Technique-specific timing matters:** T1053.003 (Cron) was missed with a 15-second post-attack window and observed with a 65-second one, because cron checks for crontab changes once per minute.
+1. **Technique-specific timing matters:** T1053.003 (Cron) was not observed with a 15-second post-attack window and observed with a 65-second one, because cron checks for crontab changes once per minute.
 
 2. **auditd did not run in this lab:** The attack manifest names auditd as the expected log source for all 11 techniques. The audit daemon did not run in the target container, and `auditctl -s` returns "Operation not permitted" even though the container is privileged. We attribute this to the Linux kernel accepting audit control only from the initial PID namespace; the container has its own. This is a property of this Compose configuration, not of Docker in general. Sharing the host PID namespace was not tested.
 
@@ -118,7 +118,7 @@ soc-detection-benchmark/
 │   └── report.py          # Report generation
 ├── results/               # Evidence files
 ├── paper/                 # LaTeX drafts
-├── tests/                 # 60 automated tests
+├── tests/                 # 123 automated tests
 └── pyproject.toml
 ```
 
@@ -132,7 +132,7 @@ python -m pytest tests/ -v
 python -m pytest tests/test_detection.py -v
 ```
 
-**60 tests**, all run without network access: Elasticsearch responses are mocked, and the rest exercise pure harness logic. They check the harness code only. Passing tests do not show that log evidence appears in the live lab or that any detection works end to end.
+**123 tests**, all run without network access: Elasticsearch responses are mocked, and the rest exercise pure harness logic. They check the harness code only. Passing tests do not show that log evidence appears in the live lab or that any detection works end to end.
 
 They cover:
 - Timestamp handling and UTC conversion
@@ -145,7 +145,7 @@ They cover:
 
 - **No auditd:** The audit daemon did not run in the target container (see Key Findings), so 9 of 11 planned techniques were not evaluated
 - **Keyword matching:** Not a Sigma rule evaluation
-- **No FP baseline:** False positive rate not measured
+- **No valid FP measurement:** No valid false positive rate measurement exists (see the note under Metrics)
 - **Single observations:** Each technique was observed in one run; runs were not repeated
 - **Manual cron setup:** Requires runtime configuration
 - **Linux only:** No Windows coverage

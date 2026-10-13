@@ -77,8 +77,12 @@ class AlertCollector:
         self,
         window: CollectionWindow,
         log_types: list[str] | None = None,
-    ) -> list[dict[str, Any]]:
-        """Collect raw logs within a time window."""
+    ) -> list[dict[str, Any]] | None:
+        """Collect raw logs within a time window.
+
+        Returns None when the query failed. An empty list means the query
+        succeeded and matched no logs.
+        """
         query = {
             "bool": {
                 "must": [
@@ -109,15 +113,19 @@ class AlertCollector:
 
         except Exception as e:
             console.print(f"[red]Error collecting logs: {e}[/red]")
-            return []
+            return None
 
     def collect_alerts_for_technique(
         self,
         technique_id: str,
         window: CollectionWindow,
         audit_keys: list[str] | None = None,
-    ) -> list[Alert]:
-        """Collect alerts that match a specific technique."""
+    ) -> list[Alert] | None:
+        """Collect alerts that match a specific technique.
+
+        Returns None when the query failed. An empty list means the query
+        succeeded and matched nothing.
+        """
         alerts = []
 
         # Build query for matching audit events
@@ -173,11 +181,23 @@ class AlertCollector:
 
         except Exception as e:
             console.print(f"[red]Error collecting alerts: {e}[/red]")
+            return None
 
         return alerts
 
-    def count_logs_in_window(self, window: CollectionWindow) -> int:
-        """Count total logs in a time window."""
+    def count_logs_in_window(
+        self,
+        window: CollectionWindow,
+        log_types: list[str] | None = None,
+    ) -> int | None:
+        """Count logs in a time window, optionally only from given log sources.
+
+        Returns None when the count could not be measured (empty or reversed
+        window, or a failed query). A measured count of zero is returned as 0.
+        """
+        if window.end <= window.start:
+            return None
+
         query = {
             "range": {
                 "@timestamp": {
@@ -187,18 +207,26 @@ class AlertCollector:
             }
         }
 
+        if log_types:
+            query = {"bool": {"must": [query], "filter": [{"terms": {"log_type": log_types}}]}}
+
         try:
             response = self.es.count(index=self.index_pattern, query=query)
             return response["count"]
-        except Exception:
-            return 0
+        except Exception as e:
+            console.print(f"[red]Error counting logs: {e}[/red]")
+            return None
 
-    def get_alert_rate(self, window: CollectionWindow, keywords: list[str]) -> float:
-        """Calculate alert rate (alerts per hour) for specific keywords."""
+    def get_alert_rate(self, window: CollectionWindow, keywords: list[str]) -> float | None:
+        """Calculate alert rate (alerts per hour) for specific keywords.
+
+        Returns None when the rate could not be measured (empty or reversed
+        window, or a failed query). A measured rate of zero is returned as 0.0.
+        """
         duration_hours = (window.end - window.start).total_seconds() / 3600
 
-        if duration_hours == 0:
-            return 0.0
+        if duration_hours <= 0:
+            return None
 
         should_clauses = [{"match": {"message": kw}} for kw in keywords]
 
@@ -221,8 +249,9 @@ class AlertCollector:
         try:
             response = self.es.count(index=self.index_pattern, query=query)
             return response["count"] / duration_hours
-        except Exception:
-            return 0.0
+        except Exception as e:
+            console.print(f"[red]Error measuring alert rate: {e}[/red]")
+            return None
 
 
 def collect_for_run(
@@ -230,8 +259,8 @@ def collect_for_run(
     end_time: datetime,
     es_host: str = "localhost",
     es_port: int = 9200,
-) -> list[dict[str, Any]]:
-    """Collect all logs for a benchmark run."""
+) -> list[dict[str, Any]] | None:
+    """Collect all logs for a benchmark run (None if the query failed)."""
     collector = AlertCollector(es_host=es_host, es_port=es_port)
 
     window = CollectionWindow(
@@ -254,6 +283,6 @@ if __name__ == "__main__":
         )
 
         count = collector.count_logs_in_window(window)
-        console.print(f"Logs in last hour: {count}")
+        console.print(f"Logs in last hour: {count if count is not None else 'N/A (not measured)'}")
     else:
         console.print("[red]Elasticsearch is not available[/red]")

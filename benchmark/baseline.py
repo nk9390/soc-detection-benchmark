@@ -129,15 +129,26 @@ def run_baseline(
         "duration_hours": duration_hours,
         "iterations": iterations,
         "total_logs": total_logs,
-        "logs_per_hour": total_logs / duration_hours if duration_hours > 0 else 0,
+        "logs_per_hour": (
+            total_logs / duration_hours
+            if total_logs is not None and duration_hours > 0
+            else None
+        ),
         "detection_alert_rate_per_hour": alert_rate,
     }
 
     console.print("\n[bold]Baseline Statistics:[/bold]")
     console.print(f"  Duration: {results['duration_seconds']:.1f}s")
-    console.print(f"  Total logs: {results['total_logs']}")
-    console.print(f"  Log rate: {results['logs_per_hour']:.1f}/hour")
-    console.print(f"  Detection alert rate: {results['detection_alert_rate_per_hour']:.1f}/hour")
+    if results["logs_per_hour"] is None:
+        console.print("  Total logs: N/A (not measured)")
+        console.print("  Log rate: N/A (not measured)")
+    else:
+        console.print(f"  Total logs: {results['total_logs']}")
+        console.print(f"  Log rate: {results['logs_per_hour']:.1f}/hour")
+    if alert_rate is None:
+        console.print("  Detection alert rate: N/A (not measured)")
+    else:
+        console.print(f"  Detection alert rate: {alert_rate:.1f}/hour")
 
     return results
 

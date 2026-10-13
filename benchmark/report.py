@@ -25,24 +25,25 @@ MARKDOWN_TEMPLATE = """# SOC Detection Benchmark Report
 | Metric | Value |
 |--------|-------|
 | Total Attacks | {{ metrics.total_attacks }} |
+| Evaluated | {{ total_evaluated }} |
 | Detected | {{ metrics.total_detected }} |
-| **Overall Detection Rate** | **{{ "%.1f"|format(metrics.overall_detection_rate * 100) }}%** |
+| **Overall Detection Rate** | **{{ "%.1f%%"|format(metrics.overall_detection_rate * 100) if metrics.overall_detection_rate is not none else "N/A" }}** |
 | Mean Time to Detect | {{ "%.2f"|format(metrics.mean_time_to_detect_seconds) if metrics.mean_time_to_detect_seconds else "N/A" }}s |
-| False Positive Rate | {{ "%.1f"|format(metrics.false_positive_rate_per_hour) }}/hour |
-| Alert Volume per Attack | {{ "%.1f"|format(metrics.alert_volume_per_attack) }} |
+| False Positive Rate | {{ "%.1f/hour"|format(metrics.false_positive_rate_per_hour) if metrics.false_positive_rate_per_hour is not none else "N/A (not measured)" }} |
+| Alert Volume per Attack | {{ "%.1f"|format(metrics.alert_volume_per_attack) if metrics.alert_volume_per_attack is not none else "N/A" }} |
 
 ## Detection by Technique
 
-| Technique | Tactic | Tests | Detected | Rate | MTTD |
-|-----------|--------|-------|----------|------|------|
+| Technique | Tactic | Tests | Evaluated | Detected | Status | Rate | MTTD |
+|-----------|--------|-------|-----------|----------|--------|------|------|
 {% for t in metrics.technique_metrics -%}
-| {{ t.technique_id }} ({{ t.technique_name }}) | {{ t.tactic }} | {{ t.tests_executed }} | {{ t.tests_detected }} | {{ "%.0f"|format(t.detection_rate * 100) }}% | {{ "%.2fs"|format(t.mean_time_to_detect_seconds) if t.mean_time_to_detect_seconds else "N/A" }} |
+| {{ t.technique_id }} ({{ t.technique_name }}) | {{ t.tactic }} | {{ t.tests_executed }} | {{ t.tests_evaluated }} | {{ t.tests_detected }} | {{ t.status }} | {{ "%.0f%%"|format(t.detection_rate * 100) if t.detection_rate is not none else "N/A" }} | {{ "%.2fs"|format(t.mean_time_to_detect_seconds) if t.mean_time_to_detect_seconds else "N/A" }} |
 {% endfor %}
 
-## Detection Gaps
+## Not Detected
 
 {% if metrics.detection_gaps -%}
-The following techniques had **0% detection rate**:
+The following techniques were evaluated and no matching alert was found. A test counts as evaluated only if the attack command succeeded, the queries succeeded, and the expected log source produced events in the collection window:
 
 {% for gap in metrics.detection_gaps -%}
 - {{ gap }}
@@ -54,13 +55,21 @@ The following techniques had **0% detection rate**:
 2. Check if Sigma rules exist for these techniques
 3. Verify log ingestion pipeline is capturing relevant events
 {% else -%}
-No detection gaps identified - all techniques had at least partial detection.
+No evaluated technique was found undetected.
 {% endif %}
+{% if not_evaluated -%}
+## Not Evaluated
 
+No conclusion can be drawn for the following tests. They are counted neither as detected nor as not detected:
+
+{% for t, reasons in not_evaluated -%}
+- {{ t.technique_id }} ({{ t.technique_name }}): {{ t.tests_executed - t.tests_evaluated }} of {{ t.tests_executed }} tests ({{ reasons }})
+{% endfor %}
+{% endif %}
 ## Methodology
 
-- **Attack Framework:** Atomic Red Team
-- **Detection Engine:** Elasticsearch with Sigma rules
+- **Attack Commands:** Hand-written commands from the attack manifest, mapped to ATT&CK (Atomic Red Team tests are not executed)
+- **Detection Method:** Keyword-based Elasticsearch queries on log messages (Sigma rules are not executed)
 - **Log Sources:** auditd, syslog, auth.log
 - **Techniques Tested:** {{ metrics.total_attacks }} across {{ metrics.technique_metrics|length }} ATT&CK techniques
 
@@ -103,7 +112,23 @@ class ReportGenerator:
         return template.render(
             metrics=metrics,
             duration_seconds=int(duration_seconds),
+            total_evaluated=sum(t.tests_evaluated for t in metrics.technique_metrics),
+            not_evaluated=[
+                (t, self._not_evaluated_reasons(t))
+                for t in metrics.technique_metrics
+                if t.tests_evaluated < t.tests_executed
+            ],
         )
+
+    @staticmethod
+    def _not_evaluated_reasons(t: TechniqueMetrics) -> str:
+        """Describe why some of a technique's tests could not be evaluated."""
+        reasons = [
+            ("attack command failed", t.attack_failures),
+            ("Elasticsearch query failed", t.collection_errors),
+            ("no events from the expected log source", t.telemetry_missing),
+        ]
+        return "; ".join(f"{label}: {count}" for label, count in reasons if count)
 
     def generate_json(self, metrics: BenchmarkMetrics) -> dict[str, Any]:
         """Generate a JSON-serializable report."""
@@ -126,11 +151,16 @@ class ReportGenerator:
                     "technique_name": t.technique_name,
                     "tactic": t.tactic,
                     "tests_executed": t.tests_executed,
+                    "tests_evaluated": t.tests_evaluated,
                     "tests_detected": t.tests_detected,
+                    "status": t.status,
                     "detection_rate": t.detection_rate,
                     "mean_time_to_detect_seconds": t.mean_time_to_detect_seconds,
                     "alert_count": t.alert_count,
                     "false_negative_count": t.false_negative_count,
+                    "collection_errors": t.collection_errors,
+                    "attack_failures": t.attack_failures,
+                    "telemetry_missing": t.telemetry_missing,
                 }
                 for t in metrics.technique_metrics
             ],
@@ -181,7 +211,9 @@ class ReportGenerator:
         summary.add_row("Detected", str(metrics.total_detected))
         summary.add_row(
             "Detection Rate",
-            f"{metrics.overall_detection_rate * 100:.1f}%",
+            f"{metrics.overall_detection_rate * 100:.1f}%"
+            if metrics.overall_detection_rate is not None
+            else "N/A",
         )
         summary.add_row(
             "Mean TTD",
@@ -191,7 +223,9 @@ class ReportGenerator:
         )
         summary.add_row(
             "FP Rate",
-            f"{metrics.false_positive_rate_per_hour:.1f}/hour",
+            f"{metrics.false_positive_rate_per_hour:.1f}/hour"
+            if metrics.false_positive_rate_per_hour is not None
+            else "N/A (not measured)",
         )
 
         console.print(summary)
@@ -200,21 +234,27 @@ class ReportGenerator:
         techniques = Table(title="\nDetection by Technique", show_header=True)
         techniques.add_column("Technique", style="cyan")
         techniques.add_column("Tactic")
+        techniques.add_column("Status")
         techniques.add_column("Rate", justify="right")
         techniques.add_column("MTTD", justify="right")
 
         for t in metrics.technique_metrics:
-            rate_style = (
-                "green"
-                if t.detection_rate >= 0.8
-                else "yellow"
-                if t.detection_rate >= 0.5
-                else "red"
-            )
+            if t.detection_rate is None:
+                rate_text = "[yellow]N/A[/yellow]"
+            else:
+                rate_style = (
+                    "green"
+                    if t.detection_rate >= 0.8
+                    else "yellow"
+                    if t.detection_rate >= 0.5
+                    else "red"
+                )
+                rate_text = f"[{rate_style}]{t.detection_rate * 100:.0f}%[/{rate_style}]"
             techniques.add_row(
                 f"{t.technique_id}",
                 t.tactic,
-                f"[{rate_style}]{t.detection_rate * 100:.0f}%[/{rate_style}]",
+                t.status,
+                rate_text,
                 f"{t.mean_time_to_detect_seconds:.2f}s"
                 if t.mean_time_to_detect_seconds
                 else "N/A",
@@ -222,11 +262,23 @@ class ReportGenerator:
 
         console.print(techniques)
 
-        # Detection gaps
+        # Evaluated techniques with no detection
         if metrics.detection_gaps:
-            console.print("\n[bold red]Detection Gaps:[/bold red]")
+            console.print("\n[bold red]Not detected (evaluated):[/bold red]")
             for gap in metrics.detection_gaps:
                 console.print(f"  - {gap}")
+
+        # Techniques with tests that support no conclusion
+        not_evaluated = [
+            t for t in metrics.technique_metrics if t.tests_evaluated < t.tests_executed
+        ]
+        if not_evaluated:
+            console.print("\n[bold yellow]Not evaluated:[/bold yellow]")
+            for t in not_evaluated:
+                console.print(
+                    f"  - {t.technique_id} ({t.technique_name}): "
+                    f"{self._not_evaluated_reasons(t)}"
+                )
 
 
 def generate_report(

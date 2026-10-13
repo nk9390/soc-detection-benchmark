@@ -24,10 +24,32 @@ class TechniqueMetrics:
     tactic: str
     tests_executed: int
     tests_detected: int
-    detection_rate: float
+    detection_rate: float | None  # None = no test could be evaluated
     mean_time_to_detect_seconds: float | None
     alert_count: int
     false_negative_count: int
+    collection_errors: int = 0  # tests whose Elasticsearch query failed
+    attack_failures: int = 0  # tests whose attack command failed
+    telemetry_missing: int = 0  # no match and no events from the expected log source
+
+    @property
+    def tests_evaluated(self) -> int:
+        """Tests that support a conclusion about detection."""
+        return (
+            self.tests_executed
+            - self.collection_errors
+            - self.attack_failures
+            - self.telemetry_missing
+        )
+
+    @property
+    def status(self) -> str:
+        """DETECTED, NOT DETECTED, or NOT EVALUATED."""
+        if self.tests_detected > 0:
+            return "DETECTED"
+        if self.tests_evaluated > 0:
+            return "NOT DETECTED"
+        return "NOT EVALUATED"
 
 
 @dataclass
@@ -39,10 +61,10 @@ class BenchmarkMetrics:
     end_time: datetime
     total_attacks: int
     total_detected: int
-    overall_detection_rate: float
+    overall_detection_rate: float | None  # None = no test could be evaluated
     mean_time_to_detect_seconds: float | None
-    false_positive_rate_per_hour: float
-    alert_volume_per_attack: float
+    false_positive_rate_per_hour: float | None  # None = no baseline measured
+    alert_volume_per_attack: float | None  # None = no test could be evaluated
     technique_metrics: list[TechniqueMetrics] = field(default_factory=list)
     detection_gaps: list[str] = field(default_factory=list)
 
@@ -52,6 +74,14 @@ class MetricsCalculator:
 
     # Default post-attack buffer in seconds
     DEFAULT_POST_BUFFER_SECONDS = 15
+
+    # Log sources (Filebeat log_type) expected to carry evidence. A test with no
+    # match is evaluated only if one of these produced events in its window.
+    DEFAULT_LOG_TYPES = ["auditd"]
+    TECHNIQUE_LOG_TYPES = {
+        "T1136.001": ["auditd", "auth"],
+        "T1053.003": ["auditd", "cron", "syslog"],
+    }
 
     # Technique-specific post-attack buffers (seconds)
     # Cron requires 65s because cron daemon checks for changes at minute boundaries
@@ -99,12 +129,21 @@ class MetricsCalculator:
         first_result = results[0]
         tests_executed = len(results)
         tests_detected = 0
+        collection_errors = 0
+        attack_failures = 0
+        telemetry_missing = 0
         total_alert_count = 0
         detection_times: list[float] = []
 
         detection_keys = self.TECHNIQUE_DETECTION_KEYS.get(technique_id, [])
+        log_types = self.TECHNIQUE_LOG_TYPES.get(technique_id, self.DEFAULT_LOG_TYPES)
 
         for result in results:
+            # An attack that did not run cannot be detected or missed
+            if not result.success:
+                attack_failures += 1
+                continue
+
             # Define collection window around the attack
             # Use technique-specific buffer for delayed telemetry (e.g., cron)
             post_buffer = self.TECHNIQUE_POST_BUFFER.get(
@@ -122,6 +161,11 @@ class MetricsCalculator:
                 audit_keys=detection_keys,
             )
 
+            # A failed query is neither a detection nor a miss
+            if alerts is None:
+                collection_errors += 1
+                continue
+
             alert_count = len(alerts)
             total_alert_count += alert_count
 
@@ -135,8 +179,17 @@ class MetricsCalculator:
                         ttd = (alert.timestamp - attack_start_utc).total_seconds()
                         detection_times.append(ttd)
                         break
+            else:
+                # No match is a miss only if the expected log source was
+                # producing events in this window
+                telemetry = self.collector.count_logs_in_window(window, log_types=log_types)
+                if telemetry is None:
+                    collection_errors += 1
+                elif telemetry == 0:
+                    telemetry_missing += 1
 
-        detection_rate = tests_detected / tests_executed if tests_executed > 0 else 0.0
+        tests_evaluated = tests_executed - collection_errors - attack_failures - telemetry_missing
+        detection_rate = tests_detected / tests_evaluated if tests_evaluated > 0 else None
         mean_ttd = (
             sum(detection_times) / len(detection_times) if detection_times else None
         )
@@ -150,7 +203,10 @@ class MetricsCalculator:
             detection_rate=detection_rate,
             mean_time_to_detect_seconds=mean_ttd,
             alert_count=total_alert_count,
-            false_negative_count=tests_executed - tests_detected,
+            false_negative_count=tests_evaluated - tests_detected,
+            collection_errors=collection_errors,
+            attack_failures=attack_failures,
+            telemetry_missing=telemetry_missing,
         )
 
     def calculate_benchmark_metrics(
@@ -175,7 +231,12 @@ class MetricsCalculator:
         # Calculate aggregate metrics
         total_attacks = sum(m.tests_executed for m in technique_metrics)
         total_detected = sum(m.tests_detected for m in technique_metrics)
-        overall_detection_rate = total_detected / total_attacks if total_attacks > 0 else 0.0
+        total_evaluated = sum(m.tests_evaluated for m in technique_metrics)
+        if total_evaluated > 0:
+            overall_detection_rate = total_detected / total_evaluated
+        else:
+            # No attacks at all keeps the previous 0.0; all queries failed is unavailable
+            overall_detection_rate = 0.0 if total_attacks == 0 else None
 
         # Calculate mean TTD across all techniques
         all_ttds = [
@@ -187,10 +248,13 @@ class MetricsCalculator:
 
         # Calculate alert volume per attack
         total_alerts = sum(m.alert_count for m in technique_metrics)
-        alert_volume = total_alerts / total_attacks if total_attacks > 0 else 0.0
+        if total_evaluated > 0:
+            alert_volume = total_alerts / total_evaluated
+        else:
+            alert_volume = 0.0 if total_attacks == 0 else None
 
-        # Calculate FP rate if baseline window provided
-        fp_rate = 0.0
+        # Calculate FP rate if baseline window provided (None = not measured)
+        fp_rate = None
         if baseline_window:
             # Count alerts during baseline that match detection patterns
             all_keywords = []
@@ -198,7 +262,7 @@ class MetricsCalculator:
                 all_keywords.extend(keys)
             fp_rate = self.collector.get_alert_rate(baseline_window, all_keywords)
 
-        # Identify detection gaps (techniques with 0% detection)
+        # Identify evaluated techniques with no detection (unevaluated ones have rate None)
         detection_gaps = [
             f"{m.technique_id} ({m.technique_name})"
             for m in technique_metrics
