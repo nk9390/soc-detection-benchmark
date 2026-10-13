@@ -1,0 +1,35 @@
+title: Local User Account Creation
+id: 3c4d5e6f-3456-789a-bcde-f01234567890
+status: experimental
+description: Detects creation of local user accounts
+references:
+    - https://attack.mitre.org/techniques/T1136/001/
+author: SOC Detection Benchmark
+date: 2024/01/15
+tags:
+    - attack.persistence
+    - attack.t1136.001
+logsource:
+    product: linux
+    service: auditd
+detection:
+    selection_useradd:
+        type: EXECVE
+        a0|endswith:
+            - '/useradd'
+            - '/adduser'
+    selection_passwd_write:
+        type:
+            - SYSCALL
+            - PATH
+        key: user_mod
+    condition: selection_useradd or selection_passwd_write
+fields:
+    - exe
+    - name
+    - pid
+    - uid
+falsepositives:
+    - Legitimate user provisioning
+    - System setup
+level: high

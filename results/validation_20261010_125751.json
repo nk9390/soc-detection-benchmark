@@ -1,0 +1,39 @@
+{
+  "technique_id": "T1136.001",
+  "validation_time": "2026-10-10T12:57:51.413140",
+  "attack": {
+    "command": "useradd -M -N -r -s /bin/bash evil_user",
+    "success": true,
+    "start_time_local": "2026-10-10T12:57:31.348311",
+    "end_time_local": "2026-10-10T12:57:31.372561",
+    "start_time_utc": "2026-10-10T07:27:31.348311Z",
+    "end_time_utc": "2026-10-10T07:27:31.372561Z",
+    "output": "",
+    "error": "",
+    "cleanup_note": "Runs internally; success not captured"
+  },
+  "collection_window": {
+    "start_utc": "2026-10-10T07:27:30.348311Z",
+    "end_utc": "2026-10-10T07:27:46.372561Z",
+    "pre_buffer_seconds": 1,
+    "post_buffer_seconds": 15
+  },
+  "es_diagnostic": {
+    "detection_keys": [
+      "user_add",
+      "user_mod",
+      "useradd"
+    ],
+    "username_filter": "evil_user",
+    "documents_found": 1
+  },
+  "metrics_calculator": {
+    "tests_executed": 1,
+    "tests_detected": 1,
+    "detection_rate": 1.0,
+    "alert_count": 1,
+    "false_negative_count": 0,
+    "mean_ttd_seconds": 3.199689
+  },
+  "result": "DETECTED"
+}

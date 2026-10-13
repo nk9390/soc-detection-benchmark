@@ -1,0 +1,422 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{geometry}
+\usepackage{amsmath}
+\usepackage{float}
+
+\geometry{margin=1in}
+
+\definecolor{codegreen}{rgb}{0,0.6,0}
+\definecolor{codegray}{rgb}{0.5,0.5,0.5}
+\definecolor{codepurple}{rgb}{0.58,0,0.82}
+\definecolor{backcolour}{rgb}{0.95,0.95,0.92}
+
+\lstdefinestyle{mystyle}{
+    backgroundcolor=\color{backcolour},
+    commentstyle=\color{codegreen},
+    keywordstyle=\color{magenta},
+    numberstyle=\tiny\color{codegray},
+    stringstyle=\color{codepurple},
+    basicstyle=\ttfamily\footnotesize,
+    breakatwhitespace=false,
+    breaklines=true,
+    captionpos=b,
+    keepspaces=true,
+    numbers=left,
+    numbersep=5pt,
+    showspaces=false,
+    showstringspaces=false,
+    showtabs=false,
+    tabsize=2
+}
+\lstset{style=mystyle}
+
+\title{Evaluating Detection Rule Efficacy: A Reproducible Benchmark for Security Operations\\
+\large{Final Audited Results --- Two Techniques Validated}}
+\author{SOC Detection Engineering Benchmark}
+\date{2026-10-10}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Security Operations Centers rely on detection rules to identify malicious activity, yet systematic evaluation of rule efficacy remains challenging. We present a reproducible benchmark framework that measures detection rule performance against simulated attack behaviors mapped to MITRE ATT\&CK. Using a containerized lab environment, we evaluate true positive rate and mean time to detect using \textbf{keyword-based Elasticsearch queries}.
+
+\textbf{Results:} Of 11 planned techniques, 2 were validated end-to-end:
+\begin{itemize}
+    \item T1136.001 (Local Account): 100\% detection, 3.20s TTD
+    \item T1053.003 (Cron): 100\% detection, 30.94s TTD (requires 65s collection window)
+\end{itemize}
+
+The remaining 9 techniques require \texttt{auditd} syscall logging, which is unavailable in Docker containers due to kernel restrictions.
+
+\textbf{Scope:} This benchmark uses keyword matching against log messages, not compiled Sigma rules. False positive rate measurement was not performed.
+\end{abstract}
+
+\section{Introduction}
+
+Detection engineering is a critical discipline within security operations, yet practitioners lack standardized methods for evaluating detection rule effectiveness. This paper presents a reproducible framework for evaluating detection rules against simulated attack behaviors.
+
+\subsection{Contributions}
+
+\begin{itemize}
+    \item A containerized lab environment for reproducible experiments
+    \item A benchmark harness that executes ATT\&CK-mapped attacks
+    \item Technique-specific collection windows for delayed telemetry
+    \item Two validated technique detections with measured TTD
+    \item Systematic telemetry gap analysis for 9 blocked techniques
+    \item 60 automated regression tests
+\end{itemize}
+
+\subsection{Scope Clarification}
+
+This implementation uses \textbf{keyword-based Elasticsearch queries}, not a Sigma rule engine. The detection approach searches for technique-specific keywords in log messages within a time window around each attack. This is simpler than full Sigma rule evaluation but sufficient for measuring detection pipeline performance.
+
+\section{Methodology}
+
+\subsection{Lab Architecture}
+
+The benchmark uses a Docker Compose stack:
+
+\begin{enumerate}
+    \item \textbf{Target Container}: Ubuntu 22.04 with rsyslog and cron
+    \item \textbf{Log Shipper}: Filebeat 8.12.0
+    \item \textbf{Detection Engine}: Elasticsearch 8.12.0 with keyword queries
+    \item \textbf{Benchmark Harness}: Python orchestration
+\end{enumerate}
+
+\subsection{Telemetry Availability}
+
+\begin{table}[H]
+    \centering
+    \caption{Log Sources in Docker Environment}
+    \begin{tabular}{lll}
+        \toprule
+        \textbf{Source} & \textbf{Status} & \textbf{Techniques Supported} \\
+        \midrule
+        auth.log & Available & T1136.001 (useradd/userdel) \\
+        cron.log & Available (manual setup) & T1053.003 (crontab changes) \\
+        auditd & \textbf{Blocked} & 9 techniques (kernel restriction) \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+\subsection{Collection Windows}
+
+The benchmark uses technique-specific post-attack buffers:
+
+\begin{itemize}
+    \item \textbf{Default}: 15 seconds (covers Filebeat ingestion latency)
+    \item \textbf{T1053.003 (Cron)}: 65 seconds (cron checks crontab at minute boundaries)
+\end{itemize}
+
+The extended cron window accounts for:
+\begin{enumerate}
+    \item Event generation delay: cron daemon checks for changes at :01 each minute
+    \item Worst-case delay: attack at :02 won't be detected until :01 of next minute (59s)
+    \item Ingestion latency: $\sim$5s for Filebeat to index the event
+\end{enumerate}
+
+\subsection{Detection Method}
+
+For each technique, detection uses keyword matching:
+
+\begin{lstlisting}[language=json,caption={Example: T1136.001 Detection Query}]
+{
+  "bool": {
+    "must": [
+      {"range": {"@timestamp": {"gte": "start", "lte": "end"}}},
+      {"bool": {
+        "should": [
+          {"match": {"message": "user_add"}},
+          {"match": {"message": "user_mod"}},
+          {"match": {"message": "useradd"}}
+        ],
+        "minimum_should_match": 1
+      }}
+    ]
+  }
+}
+\end{lstlisting}
+
+\subsection{Metrics}
+
+\begin{itemize}
+    \item \textbf{True Positive Rate}: $\frac{\text{Detected Attacks}}{\text{Executed Attacks}}$
+    \item \textbf{Mean Time to Detect (TTD)}: First alert timestamp - attack start time
+    \item \textbf{Alert Volume}: Number of matching events per attack
+\end{itemize}
+
+\section{Results}
+
+\subsection{T1136.001 - Local Account Creation}
+
+\begin{table}[H]
+    \centering
+    \caption{T1136.001 Validation Results}
+    \begin{tabular}{lr}
+        \toprule
+        \textbf{Metric} & \textbf{Value} \\
+        \midrule
+        Attack Command & \texttt{useradd -M -N -r -s /bin/bash evil\_user} \\
+        Attack Success & True \\
+        Detection Result & \textbf{DETECTED} \\
+        Detection Rate & 100\% \\
+        Mean Time to Detect & \textbf{3.20 seconds} \\
+        Collection Window & 16s (1s pre, 15s post) \\
+        Documents Matched & 1 (with username filter) \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+\textbf{Evidence:} \texttt{results/validation\_20261010\_125751.json}
+
+\textbf{Attribution:} Detection query included username filter \texttt{evil\_user}, confirming the alert corresponds to this specific attack execution.
+
+\textbf{TTD Interpretation:} The 3.20s TTD reflects Filebeat ingestion latency. Auth.log events are generated immediately upon user creation.
+
+\subsection{T1053.003 - Cron Persistence}
+
+\begin{table}[H]
+    \centering
+    \caption{T1053.003 Validation Results}
+    \begin{tabular}{lr}
+        \toprule
+        \textbf{Metric} & \textbf{Value} \\
+        \midrule
+        Attack Command & \texttt{echo "..." >> /etc/crontab} \\
+        Attack Success & True \\
+        Detection Result & \textbf{DETECTED} \\
+        Detection Rate & 100\% \\
+        Mean Time to Detect & \textbf{30.94 seconds} \\
+        Collection Window & 66s (1s pre, 65s post) \\
+        Alert Count & 2 \\
+        Cleanup Verified & Yes (independent verification) \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+\textbf{Evidence:} \texttt{results/t1053003\_65s\_window\_20261010\_140043.json}
+
+\textbf{TTD Interpretation:} The 30.94s TTD reflects cron's minute-boundary checking behavior:
+\begin{itemize}
+    \item Attack executed at :33 seconds into the minute
+    \item Cron daemon checks crontab at :01 of each minute
+    \item RELOAD event generated at :01 of next minute ($\sim$28s delay)
+    \item Filebeat ingestion adds $\sim$3s
+\end{itemize}
+
+\subsubsection{rsyslog Message Compression}
+
+\textbf{Caveat:} The cron telemetry is affected by rsyslog's repeated message reduction (\texttt{\$RepeatedMsgReduction on}). When multiple identical RELOAD events occur at consecutive minute boundaries, rsyslog compresses them into a single log entry: ``message repeated N times: [(*system*) RELOAD (/etc/crontab)]''
+
+This compression affects timestamp precision:
+\begin{itemize}
+    \item The compressed message timestamp reflects the \emph{last} occurrence, not the first
+    \item Individual event attribution becomes imprecise when compression occurs
+    \item Detection validity is unaffected (the event is still captured), but TTD measurement may vary
+\end{itemize}
+
+Evidence of compression from the 15s window failure run:
+\begin{lstlisting}
+"message": "Oct 10 07:49:01 ... cron[1958]: message repeated 2 times:
+            [ (*system*) RELOAD (/etc/crontab)]"
+\end{lstlisting}
+
+\subsection{Failed Detection Analysis (15s Window)}
+
+An initial T1053.003 run with a 15-second collection window failed to detect the attack:
+
+\begin{table}[H]
+    \centering
+    \caption{T1053.003 Failure Analysis (15s Window)}
+    \begin{tabular}{lr}
+        \toprule
+        \textbf{Metric} & \textbf{Value} \\
+        \midrule
+        Attack Time & 07:46:37 UTC \\
+        Collection Window End & 07:46:52 UTC \\
+        Cron RELOAD Time & 07:47:01 UTC (estimated) \\
+        Documents in Window & 0 \\
+        Documents in Extended Search & 2 \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+\textbf{Evidence:} \texttt{results/t1053003\_validation\_20261010\_132113.json}
+
+This failure informed the design of technique-specific collection windows.
+
+\subsection{Technique Readiness Summary}
+
+\begin{table}[H]
+    \centering
+    \caption{All 11 Techniques - Final Status}
+    \begin{tabular}{llll}
+        \toprule
+        \textbf{ID} & \textbf{Technique} & \textbf{Status} & \textbf{Reason} \\
+        \midrule
+        T1136.001 & Local Account & \textbf{VALIDATED} & auth.log available \\
+        T1053.003 & Cron & \textbf{VALIDATED} & cron.log available \\
+        \midrule
+        T1059.004 & Unix Shell & BLOCKED & Requires auditd \\
+        T1548.001 & Setuid/Setgid & BLOCKED & Requires auditd \\
+        T1070.004 & File Deletion & BLOCKED & Requires auditd \\
+        T1070.003 & Clear History & BLOCKED & Requires auditd \\
+        T1027 & Obfuscated Files & BLOCKED & Requires auditd \\
+        T1018 & Remote Discovery & BLOCKED & Requires auditd \\
+        T1082 & System Info & BLOCKED & Requires auditd \\
+        T1105 & Tool Transfer & BLOCKED & Requires auditd \\
+        T1571 & Non-Std Port & BLOCKED & Requires auditd \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+\subsection{Aggregate Metrics}
+
+\begin{table}[H]
+    \centering
+    \caption{Benchmark Summary}
+    \begin{tabular}{lr}
+        \toprule
+        \textbf{Metric} & \textbf{Value} \\
+        \midrule
+        Total Techniques & 11 \\
+        Eligible (telemetry available) & 2 \\
+        Executed & 2 \\
+        Detected & 2 \\
+        Detection Rate (of eligible) & \textbf{100\%} \\
+        Detection Rate (of total) & 18.2\% \\
+        Blocked (no telemetry) & 9 \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+\section{Evidence Audit}
+
+This section documents the verification performed on each detection claim.
+
+\subsection{T1136.001 Audit}
+
+\begin{table}[H]
+    \centering
+    \caption{T1136.001 Evidence Verification}
+    \begin{tabular}{lll}
+        \toprule
+        \textbf{Criterion} & \textbf{Status} & \textbf{Notes} \\
+        \midrule
+        Attack execution & Verified & \texttt{success: true} \\
+        Event attribution & Verified & Username filter \texttt{evil\_user} applied \\
+        Timestamp consistency & Verified & Attack at 07:27:31, alert within window \\
+        TTD measurement & Verified & 3.2s consistent with ingestion latency \\
+        Cleanup & Partial & Internal cleanup, not independently verified \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+\subsection{T1053.003 Audit}
+
+\begin{table}[H]
+    \centering
+    \caption{T1053.003 Evidence Verification}
+    \begin{tabular}{lll}
+        \toprule
+        \textbf{Criterion} & \textbf{Status} & \textbf{Notes} \\
+        \midrule
+        Attack execution & Verified & \texttt{success: true}, exit code 0 \\
+        Event attribution & Qualified & 2 alerts matched; rsyslog compression \\
+        Timestamp consistency & Verified & Attack at 08:29:33, RELOAD expected 08:30:01 \\
+        TTD measurement & Verified & 30.9s = event delay + ingestion \\
+        Cleanup & Verified & Independent verification, \texttt{crontab\_clean: true} \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+\section{Limitations}
+
+\begin{enumerate}
+    \item \textbf{auditd unavailable}: Docker kernel restrictions block 9 of 11 techniques
+    \item \textbf{Keyword matching only}: Not a Sigma rule evaluation
+    \item \textbf{No FP measurement}: Baseline workload not executed
+    \item \textbf{Linux-only}: No Windows coverage
+    \item \textbf{Cron telemetry manual}: Requires runtime setup (not persistent in container)
+    \item \textbf{rsyslog compression}: Repeated identical messages may be compressed, affecting timestamp precision
+    \item \textbf{Small sample}: Each technique tested once
+    \item \textbf{T1136.001 cleanup}: Not independently verified (runner internal cleanup)
+\end{enumerate}
+
+\section{Reproducibility}
+
+\subsection{Environment}
+
+\begin{itemize}
+    \item Host: macOS (Darwin 27.0.0)
+    \item Docker: Elasticsearch 8.12.0, Filebeat 8.12.0, Ubuntu 22.04
+    \item Python: 3.13.5
+\end{itemize}
+
+\subsection{Commands}
+
+\begin{lstlisting}[language=bash]
+# Start lab
+cd docker && docker-compose up -d
+
+# Enable cron telemetry (required for T1053.003)
+docker exec soc-target bash -c '
+  sed -i "s/#cron.*/cron.*/" /etc/rsyslog.d/50-default.conf
+  killall rsyslogd; rsyslogd
+  service cron start'
+
+# Run tests
+python -m pytest tests/ -v
+
+# Execute single technique
+python -c "from benchmark.runner import AttackRunner; \\
+  r = AttackRunner(); r.run_single_technique('T1136.001')"
+\end{lstlisting}
+
+\subsection{Test Suite}
+
+60 automated tests covering:
+\begin{itemize}
+    \item Timestamp handling and UTC conversion
+    \item Collection window buffers (default 15s, cron-specific 65s)
+    \item Detection key matching
+    \item Metrics calculation
+    \item Attack result serialization
+\end{itemize}
+
+\section{Conclusion}
+
+We validated detection for 2 of 11 ATT\&CK techniques in a Docker-based lab:
+\begin{itemize}
+    \item T1136.001: 3.20s TTD via auth.log (reflects ingestion latency)
+    \item T1053.003: 30.94s TTD via cron.log (reflects cron's minute-boundary behavior)
+\end{itemize}
+
+The remaining 9 techniques require auditd syscall logging, unavailable in Docker. Full coverage requires a VM-based environment.
+
+\textbf{Key engineering contributions:}
+\begin{enumerate}
+    \item Technique-specific collection windows addressing the fundamental timing difference between immediate telemetry (auth.log) and delayed telemetry (cron's minute-boundary checks)
+    \item Explicit documentation of rsyslog message compression as a telemetry artifact
+    \item Independent cleanup verification protocol for T1053.003
+\end{enumerate}
+
+\section*{Appendix: Evidence Files}
+
+\begin{itemize}
+    \item \texttt{results/validation\_20261010\_125751.json} - T1136.001 (DETECTED)
+    \item \texttt{results/t1053003\_65s\_window\_20261010\_140043.json} - T1053.003 (DETECTED)
+    \item \texttt{results/t1053003\_validation\_20261010\_132113.json} - T1053.003 (15s window, NOT\_DETECTED)
+\end{itemize}
+
+\end{document}

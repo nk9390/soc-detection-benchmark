@@ -1,0 +1,865 @@
+% Revised draft (Phase 2), based on draft_final_review4.tex.
+% Former title: "Evaluating Detection Rule Efficacy: A Reproducible Benchmark
+% for Security Operations". The title was changed because no detection rule
+% was executed in the reported runs. AUTHOR: approve or revert the title.
+% Lines marked "AUTHOR:" need the author's decision before submission.
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{geometry}
+\usepackage{amsmath}
+\usepackage{float}
+
+\geometry{margin=1in}
+
+\definecolor{codegreen}{rgb}{0,0.6,0}
+\definecolor{codegray}{rgb}{0.5,0.5,0.5}
+\definecolor{codepurple}{rgb}{0.58,0,0.82}
+\definecolor{backcolour}{rgb}{0.95,0.95,0.92}
+
+\lstdefinestyle{mystyle}{
+    backgroundcolor=\color{backcolour},
+    commentstyle=\color{codegreen},
+    keywordstyle=\color{magenta},
+    numberstyle=\tiny\color{codegray},
+    stringstyle=\color{codepurple},
+    basicstyle=\ttfamily\footnotesize,
+    breakatwhitespace=false,
+    breaklines=true,
+    captionpos=b,
+    keepspaces=true,
+    showspaces=false,
+    showstringspaces=false,
+    showtabs=false,
+    tabsize=2
+}
+\lstset{style=mystyle}
+
+\title{Telemetry Availability and Log-Availability Latency in a Containerized
+Detection Benchmark: An Experience Report}
+\author{SOC Detection Engineering Benchmark} % AUTHOR: replace with author name(s) and affiliation
+\date{2026-10-10}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Benchmarks for security detection content depend on the test environment
+producing the log evidence that a detection would need. We report what happened
+when we built a small containerized Linux lab to exercise 11 MITRE ATT\&CK
+techniques and measured, for each, whether log evidence reached Elasticsearch
+within a collection window after the attack command ran. Evidence was matched
+with keyword-based Elasticsearch queries; no Sigma rule or other detection rule
+was executed. Evidence was observed for 2 of the 11 planned techniques, each in
+a single run: local account creation (T1136.001), with a log-availability
+latency of 3.20\,s, and cron persistence (T1053.003), with a latency of
+30.94\,s, which required a 65\,s post-attack window after a 15\,s window
+missed the event. The other 9 techniques were not evaluated after the harness
+was corrected: the audit daemon, their expected log source, did not run in the
+container, which we attribute to the Linux kernel permitting audit control only
+from the initial PID namespace. No false-positive baseline was measured
+and runs were not repeated, so the results are observations about this lab, not
+estimates of detection performance. We describe the measurement problems we
+encountered and what they imply for building such a benchmark.
+\end{abstract}
+
+\section{Introduction}
+
+Detection engineers test detection content by running attack behaviors in a
+lab and checking whether the expected alerts appear. That check has a
+precondition that is easy to overlook: the lab must generate, ship, and index
+the log events the detection reads, and must do so within the time the test
+harness waits. If it does not, a missed detection says nothing about the
+detection logic.
+
+We built a containerized lab and harness intended to benchmark detection rules
+against ATT\&CK-mapped attack commands. The work did not reach that goal. Only
+2 of 11 planned techniques produced observable log evidence, and the evidence
+was matched by keyword queries, not by rules. This paper reports that outcome
+and the reasons for it.
+
+\subsection{Research Question}
+
+\begin{quote}
+In a containerized Linux lab with file-based log shipping, which log sources
+yielded observable evidence for a planned set of ATT\&CK techniques, and how
+did source-specific event-generation delay affect the collection window needed
+to observe that evidence?
+\end{quote}
+
+\subsection{Contributions}
+
+\begin{itemize}
+    \item An account of why 9 of 11 planned techniques could not be evaluated
+    in this lab, attributed to a kernel restriction on audit control outside
+    the initial PID namespace (Section~\ref{sec:telemetry}).
+    \item A worked example of a collection-window failure: a 15\,s window
+    missed cron evidence that a 65\,s window captured, because cron checks
+    for crontab changes once per minute (Section~\ref{sec:cron}).
+    \item A list of measurement-validity problems found while auditing our own
+    results, including attribution confounds and a log-compression artifact
+    (Section~\ref{sec:threats}).
+    \item The harness, lab configuration, and evidence files, with a unit test
+    suite of 60 tests covering the harness logic.
+\end{itemize}
+
+\subsection{Scope}
+
+The paper does not evaluate detection rules. The repository contains 10 Sigma
+rule files, but the harness never loaded them; all reported matches came from
+keyword queries (Section~\ref{sec:query}). The paper reports no false-positive
+rate and no repeated runs. We use \emph{observed} to mean that at least one
+indexed log document matched a technique's keywords inside its collection
+window.
+
+\section{Background and Related Work}
+
+\paragraph{ATT\&CK and adversary emulation.}
+MITRE ATT\&CK is a knowledge base of adversary tactics and techniques
+\cite{attack-design}. Automated emulation of ATT\&CK techniques dates at least
+to Applebaum et al.\ \cite{applebaum2016}, and Atomic Red Team provides a
+library of tests mapped to ATT\&CK \cite{atomic}. MITRE's own evaluations apply
+emulation to commercial endpoint products \cite{attack-evals}; Shen et al.\
+analyzed the results of those evaluations \cite{shen2024}. Virkud et al.\
+examined ATT\&CK-annotated rule sets from Carbon Black, Splunk, Elastic, and
+Sigma and concluded that technique coverage is a limited measure of security
+posture, in part because many techniques cannot be realized as detection rules
+\cite{virkud2024}. Our count of observed techniques should be read with that
+caution in mind.
+
+\paragraph{Rule-based detection and Sigma.}
+Sigma is a generic signature format for SIEM systems \cite{sigma-spec}; rules
+are converted to backend queries by tools such as pySigma \cite{pysigma}. Uetz
+et al.\ showed that a substantial share of the Sigma rules they analyzed could
+be evaded by small changes to attack commands \cite{uetz2024}. Recent preprints
+study how public rule repositories change over time \cite{long2026} and how
+rule sets can be optimized \cite{shukla2025}. These studies analyze or execute
+real rules. Our keyword queries are much cruder, and our results are not
+comparable with theirs.
+
+\paragraph{Testbeds and log datasets.}
+The closest prior work builds testbeds that generate log data reproducibly.
+SOCBED is an open testbed designed so that log data generation can be repeated
+and adapted \cite{uetz2021}. Landauer et al.\ generate labelled log datasets
+from model-driven testbeds \cite{landauer2021,landauer2022}. These projects
+operate at a larger scale than ours and repeat their scenarios; we ran each
+technique once.
+
+\paragraph{Alert quality.}
+Axelsson showed that the false-alarm rate limits the usefulness of an
+intrusion detector when attacks are rare \cite{axelsson2000}, which is why a
+detection count without a false-positive measurement is incomplete. Alahmadi et
+al.\ found that SOC practitioners attribute most false positives to benign
+triggers, that is, alarms that fire correctly on legitimate activity
+\cite{alahmadi2022}. Studies of SOC practice document the cost of rule
+maintenance and alert handling \cite{vermeer2022,vermeer2023,kokulu2019}.
+
+\paragraph{Host telemetry in containers.}
+The Linux audit subsystem is not namespace-aware, which complicates auditing
+of containers \cite{lim2021,chen2021}. Houssel et al.\ compare kernel telemetry
+options and identify eBPF as the most promising \cite{houssel2026}. The
+specific restriction that affected our lab is in the kernel source
+\cite{linux-audit} and is described in Section~\ref{sec:telemetry}.
+
+\paragraph{Evaluation methodology.}
+McHugh's critique of the DARPA intrusion detection evaluations
+\cite{mchugh2000}, the survey of benchmarking flaws by van der Kouwe et al.\
+\cite{vanderkouwe2019}, and Collberg and Proebsting's study of repeatability
+\cite{collberg2016} motivate the explicit reporting of scope, sample size, and
+failed runs in this paper.
+
+\paragraph{Gap.}
+We did not find prior work that reports, for a small containerized lab, which
+log sources were available per technique and how event-generation timing
+constrained the collection window. Our search was a narrative review, not a
+systematic one, so we do not claim that no such work exists.
+
+\section{Lab and Measurement Method}
+
+\subsection{Lab Architecture}
+
+The lab was a Docker Compose stack on a macOS host:
+
+\begin{enumerate}
+    \item \textbf{Target container}: Ubuntu 22.04, run with
+    \texttt{privileged: true}, with rsyslog, cron, and the auditd package
+    installed.
+    \item \textbf{Log shipper}: Filebeat 8.12.0, reading the target's
+    \texttt{/var/log} through a shared volume.
+    \item \textbf{Log store}: Elasticsearch 8.12.0 (Kibana 8.12.0 was also
+    deployed but not used in the measurements).
+    \item \textbf{Harness}: Python code on the host that ran attack commands
+    with \texttt{docker exec} and then queried Elasticsearch.
+\end{enumerate}
+
+\subsection{Technique Set}
+
+The attack manifest listed 11 ATT\&CK techniques with 12 test commands (T1105
+had two). The commands were written by hand for this project. The target image
+clones the Atomic Red Team repository, but the harness did not execute Atomic
+Red Team tests.
+
+\subsection{Telemetry Availability}
+\label{sec:telemetry}
+
+The manifest named auditd as the expected log source for all 11 techniques.
+The audit daemon did not start in the target container. An earlier draft of
+this report recorded the error \texttt{Error setting audit daemon pid
+(Operation not permitted)}; the error output was not saved in the results
+directory. A read-only status query in the running container on 2026-10-13
+found no audit daemon process, and \texttt{auditctl -s} returned
+\texttt{Error sending status request (Operation not permitted)}. We attribute
+the failure to a restriction in the kernel source: audit control
+messages are rejected with \texttt{EPERM} unless the sender is in the initial
+PID namespace \cite{linux-audit}. The container had its own PID namespace, so
+the \texttt{privileged} setting did not help. We did not rule out other causes
+experimentally. This is a property of our
+Compose configuration, not of Docker in general. We did not test whether
+sharing the host PID namespace would allow auditd to run.
+
+Two techniques also left evidence in other log files
+(Table~\ref{tab:sources}). Cron logging was off by default in the image and
+was enabled by hand at run time (Section~\ref{sec:repro}).
+
+\begin{table}[H]
+    \centering
+    \caption{Log sources in the lab as configured}
+    \label{tab:sources}
+    \begin{tabular}{lll}
+        \toprule
+        \textbf{Source} & \textbf{Status} & \textbf{Techniques with evidence} \\
+        \midrule
+        \texttt{auth.log} & Available & T1136.001 \\
+        \texttt{cron.log} & Available after manual setup & T1053.003 \\
+        auditd & Not running & None (9 techniques not evaluated) \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+\subsection{Evidence Query}
+\label{sec:query}
+
+For each technique the harness ran a keyword query: a time-range filter on
+\texttt{@timestamp} combined with a disjunction of \texttt{match} clauses on
+the \texttt{message} field. Listing~\ref{lst:query} shows the query for
+T1136.001. The keywords for T1053.003 were \texttt{cron\_mod} and
+\texttt{crontab}. A technique was counted as observed if the query returned at
+least one document. The query was run after the fact; no scheduled rule
+produced an alert.
+
+\begin{lstlisting}[caption={Evidence query for T1136.001},label={lst:query}]
+{
+  "bool": {
+    "must": [
+      {"range": {"@timestamp": {"gte": "start", "lte": "end"}}},
+      {"bool": {
+        "should": [
+          {"match": {"message": "user_add"}},
+          {"match": {"message": "user_mod"}},
+          {"match": {"message": "useradd"}}
+        ],
+        "minimum_should_match": 1
+      }}
+    ]
+  }
+}
+\end{lstlisting}
+
+\subsection{Collection Windows}
+
+The window for each test started 1\,s before the attack command started and
+ended a fixed buffer after it finished. The default buffer was 15\,s. After
+the failure described in Section~\ref{sec:cron}, the buffer for T1053.003 was
+set to 65\,s, because cron checks the modification time of
+\texttt{/etc/crontab} once per minute \cite{cron-man}, so the reload event can
+lag the change by up to about 60\,s before shipping delay is added.
+
+\subsection{Measures}
+
+\begin{itemize}
+    \item \textbf{Observed}: whether at least one document matched within the
+    window.
+    \item \textbf{Log-availability latency}: the \texttt{@timestamp} of the
+    first matching document at or after the attack start, minus the attack
+    start time. Earlier drafts called this ``time to detect.'' It is not a
+    detection time, because nothing detected anything. The two timestamps come
+    from different clocks: the attack start from the harness on the host, and
+    \texttt{@timestamp} from Filebeat, which stamps each line when it reads
+    it. Clock offset between the two was not measured.
+    \item \textbf{Match count}: the number of matching documents in the window.
+\end{itemize}
+
+The harness contains code for a benign baseline and a false-positive rate, but
+no baseline was run. Generated reports print a false-positive rate of
+0.0 per hour in that case; that value means ``not measured.''
+
+\section{Results}
+
+All runs took place on 2026-10-10. Each result below comes from one run.
+
+\subsection{Pilot Runs of the Full Manifest}
+
+Four runs of the full manifest (12 tests across 11 techniques) between 10:16
+and 11:07 local time each reported 0 of 12 tests observed, including the two
+techniques that were later observed in single-technique runs. The result files
+do not record the cause. The timestamp-handling tests added to the test suite
+afterwards suggest an error in converting local time to UTC when building the
+query window, but we did not confirm this from the artifacts. Cron logging was
+also not yet enabled during these runs. We report the pilot runs because they
+are the only runs in which the other nine techniques were executed, and those
+nine were not run again after the harness was changed. Their status in
+Table~\ref{tab:status} therefore rests on the absence of auditd, not on a
+later run that returned no matches.
+
+\subsection{T1136.001: Local Account Creation}
+
+\begin{table}[H]
+    \centering
+    \caption{T1136.001, single run}
+    \label{tab:t1136}
+    \begin{tabular}{ll}
+        \toprule
+        \textbf{Item} & \textbf{Value} \\
+        \midrule
+        Attack command & \texttt{useradd -M -N -r -s /bin/bash evil\_user} \\
+        Command succeeded & Yes \\
+        Collection window & 1\,s before start to 15\,s after end \\
+        Observed & Yes (1 of 1 run) \\
+        Log-availability latency & 3.20\,s \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+Evidence file: \texttt{results/validation\_20261010\_125751.json}.
+
+Table~\ref{tab:t1136} gives the run details. The matching event came from
+\texttt{auth.log}. The latency of 3.20\,s
+covers log writing, Filebeat pickup, and indexing; we did not separate these
+components. A separate diagnostic query that added the username
+\texttt{evil\_user} returned one document, which supports attributing the
+match to this run. That username filter is not part of the harness query, so
+the harness alone would also have matched any other \texttt{useradd} activity
+in the window. Cleanup (\texttt{userdel}) was run by the harness and was not
+checked independently.
+
+\subsection{T1053.003: Cron Persistence}
+\label{sec:cron}
+
+\paragraph{Run with the 15\,s window (not observed).}
+The attack command appended a line to \texttt{/etc/crontab} at 07:46:37 UTC.
+The window closed at 07:46:52 UTC with 0 matching documents
+(Table~\ref{tab:cron15}). A wider search afterwards found 2 documents. The one
+recorded in the evidence file was indexed at 07:49:44 UTC and read
+``\texttt{message repeated 2 times: [ (*system*) RELOAD (/etc/crontab)]}''
+with a syslog time of 07:49:01. The reload time of 07:47:01 in the evidence
+file is an estimate, not a logged value.
+
+\begin{table}[H]
+    \centering
+    \caption{T1053.003 with a 15\,s post-attack window, single run}
+    \label{tab:cron15}
+    \begin{tabular}{ll}
+        \toprule
+        \textbf{Item} & \textbf{Value} \\
+        \midrule
+        Attack start & 07:46:37 UTC \\
+        Window end & 07:46:52 UTC \\
+        Matching documents in window & 0 \\
+        Matching documents in wider search & 2 \\
+        Observed & No (0 of 1 run) \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+Evidence file: \texttt{results/t1053003\_validation\_20261010\_132113.json}.
+
+\paragraph{Run with the 65\,s window (observed).}
+With the buffer raised to 65\,s, a second run was observed
+(Table~\ref{tab:cron65}).
+
+\begin{table}[H]
+    \centering
+    \caption{T1053.003 with a 65\,s post-attack window, single run}
+    \label{tab:cron65}
+    \begin{tabular}{lp{0.62\textwidth}}
+        \toprule
+        \textbf{Item} & \textbf{Value} \\
+        \midrule
+        Attack command & \texttt{echo "* * * * * root /tmp/malicious.sh" >{}> /etc/crontab} \\
+        Command succeeded & Yes \\
+        Attack start & 08:29:33 UTC \\
+        Collection window & 1\,s before start to 65\,s after end \\
+        Observed & Yes (1 of 1 run) \\
+        Matching documents & 2 \\
+        Log-availability latency & 30.94\,s \\
+        Cleanup checked independently & Yes \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+Evidence file: \texttt{results/t1053003\_65s\_window\_20261010\_140043.json}.
+
+Four qualifications apply to this result.
+
+\begin{enumerate}
+    \item \textbf{The latency mostly reflects when the command ran.} The
+    attack started 33\,s into the minute and cron reloads at the next minute
+    boundary, so about 27\,s of the 30.94\,s is waiting for cron. A run
+    started at a different second would give a different value. The figure is
+    one sample, not a characteristic latency for the technique.
+    \item \textbf{The match cannot be tied to the malicious entry.} The
+    harness ran the cleanup command immediately after the attack command, so
+    the crontab was edited twice before cron next checked it. The matched
+    event is a generic reload message that contains the token
+    \texttt{crontab}; it does not name the entry that changed.
+    \item \textbf{The match count of 2 is one event counted twice.} The
+    evidence file stores the count but not the matched documents. The
+    documents still held in Elasticsearch, read on 2026-10-13, are the same
+    reload line indexed once from \texttt{syslog} and once from
+    \texttt{cron.log}, both of which Filebeat ships. The match count is
+    therefore inflated for any message written to more than one shipped
+    file.
+    \item \textbf{A 65\,s window is not a guaranteed bound.} The image sets
+    \texttt{\$RepeatedMsgReduction on}, so rsyslog can replace repeated
+    identical messages with a later ``message repeated'' line. In the 15\,s
+    run this delayed the indexed document to about three minutes after the
+    attack.
+\end{enumerate}
+
+\subsection{Status of All Planned Techniques}
+
+Table~\ref{tab:status} summarizes the outcome. Evidence was observed for 2 of
+11 planned techniques (18\%). Both techniques whose telemetry was available
+were observed, in one run each. With one success in one trial, a 95\% Wilson
+interval for the per-run probability of observation runs from about 0.21 to 1
+\cite{brown2001}, so these runs do not establish that the evidence appears
+reliably.
+
+\begin{table}[H]
+    \centering
+    \caption{Status of the 11 planned techniques. ``Not evaluated'' means the
+    technique was executed only in the pilot runs, before the harness was
+    changed, and was not run again.}
+    \label{tab:status}
+    \begin{tabular}{llll}
+        \toprule
+        \textbf{ID} & \textbf{Technique} & \textbf{Status} & \textbf{Basis} \\
+        \midrule
+        T1136.001 & Local Account & Observed (1 run) & \texttt{auth.log} \\
+        T1053.003 & Cron & Observed (1 run, 65\,s window) & \texttt{cron.log} \\
+        \midrule
+        T1059.004 & Unix Shell & Not evaluated & auditd not running \\
+        T1548.001 & Setuid and Setgid & Not evaluated & auditd not running \\
+        T1070.004 & File Deletion & Not evaluated & auditd not running \\
+        T1070.003 & Clear Command History & Not evaluated & auditd not running \\
+        T1027 & Obfuscated Files or Information & Not evaluated & auditd not running \\
+        T1018 & Remote System Discovery & Not evaluated & auditd not running \\
+        T1082 & System Information Discovery & Not evaluated & auditd not running \\
+        T1105 & Ingress Tool Transfer & Not evaluated & auditd not running \\
+        T1571 & Non-Standard Port & Not evaluated & auditd not running \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+\section{Threats to Validity and Limitations}
+\label{sec:threats}
+
+\paragraph{Construct validity.}
+The measurements describe log availability, not detection. Keyword matching on
+the message text is weaker than a detection rule: for T1136.001 the keyword
+\texttt{useradd} matches the name of the program that wrote the log line. No
+rule schedule was involved, so the latencies exclude the delay a scheduled
+detection rule would add. Because no benign baseline was run, we cannot say
+how often the same keywords match during normal activity; some keywords for
+the unobserved techniques (for example \texttt{hostname} and \texttt{nc}) are
+common words in log text.
+
+\paragraph{Internal validity.}
+The harness and Filebeat clocks were not compared. The cron result is
+confounded by the cleanup edit and affected by rsyslog message reduction
+(Section~\ref{sec:cron}). The pilot runs failed for a reason that the
+artifacts do not record. The two evidence files for the observed techniques
+were assembled outside the repository's scripts, so the exact procedure that
+produced them is not captured in code. A read-only inspection of the running
+target container on 2026-10-13 found two \texttt{rsyslogd} processes. Neither
+setup command on record reproduces the container's configuration: the command
+in \texttt{results/t1053003\_telemetry\_enabled.json} would leave a malformed
+selector in the rsyslog configuration, and the command in earlier drafts leaves
+no log path and, in a disposable container, no second daemon. The procedure
+actually used to enable cron logging on 2026-10-10 is therefore unknown, and we
+do not know whether the second daemon affected the results.
+% AUTHOR: confirm you are content to report the 2026-10-13 inspection.
+
+\paragraph{External validity.}
+The lab was one Linux container run under Colima on macOS, with one log
+store. Nothing here generalizes to Windows hosts, virtual machines, other
+shippers, or production log volumes. The nine unobserved techniques may well
+be observable in an environment where auditd runs; we did not test one.
+
+\paragraph{Statistical conclusion validity.}
+Each technique was run once. No rates, means, or distributions can be
+estimated.
+
+\paragraph{Other limitations.}
+The Sigma rule files in the repository were not used, and there is no rule
+file for T1027. Cron logging required manual setup that does not persist when
+the container is recreated. The project directory was not under version
+control when the runs were made, so the code state is identified only by file
+timestamps.
+
+\section{Discussion}
+
+The answer to the research question is narrow. In this lab, two log sources,
+\texttt{auth.log} and \texttt{cron.log}, yielded evidence, for one technique
+each. The source that the design depended on, auditd, yielded none; the
+likely reason could have been found in the kernel source before the lab was
+built.
+
+The cron case shows that a single collection window for all techniques is
+inadequate. The delay between an action and its log event depends on the
+mechanism that writes the event: \texttt{useradd} logs as it runs, whereas
+cron logs a reload at its next minute check. A harness that waits a fixed
+15\,s will report a miss for evidence that arrives later, and the miss will
+look like a detection failure. Message reduction in the log daemon can extend
+the delay further and unpredictably.
+
+Three practices would have prevented most of the problems reported above:
+checking that each expected log source produces events before running attacks;
+recording the matched documents, not only their count, with each result; and
+separating attack and cleanup by more than the longest expected logging delay.
+These are suggestions drawn from one small lab, not tested recommendations.
+
+\section{Reproducibility}
+\label{sec:repro}
+
+\subsection{Environment}
+
+\begin{itemize}
+    \item Host: macOS (Darwin 27.0.0); Python 3.13.5.
+    \item Container runtime: Colima, with an Ubuntu 24.04 virtual machine on
+    Linux kernel 6.8.0-117, as reported by \texttt{docker info} on 2026-10-13.
+    The runtime was not recorded on the day of the runs.
+    \item Images: Elasticsearch 8.12.0, Kibana 8.12.0, Filebeat 8.12.0,
+    Ubuntu 22.04 (target, built from \texttt{docker/target/Dockerfile}).
+\end{itemize}
+
+\subsection{Commands}
+
+Commands are run from the repository root. The first three correspond to
+Makefile targets in the repository.
+
+\begin{lstlisting}[language=bash,caption={Install, start the lab, and run the unit tests}]
+make install     # pip install -e ".[dev]"
+make up          # docker compose -f docker/docker-compose.yml up -d --build
+make test        # pytest tests/ -v
+\end{lstlisting}
+
+Cron logging must be enabled in the target container before T1053.003 is run.
+The command in earlier drafts does not do this correctly:
+its \texttt{sed} expression replaces the whole line and removes the log file
+path, and \texttt{killall} is not installed in the image. The form below
+uncomments the line and uses \texttt{pkill}, which is installed. We
+subsequently tested the \texttt{sed} expression and the complete command
+sequence in a fresh disposable container created from the
+\texttt{docker-target} image; the sequence created
+\texttt{/var/log/cron.log}, which contained cron startup lines. The full
+\texttt{docker exec soc-target} command was not executed against the live lab
+container, so that form remains unverified.
+
+\begin{lstlisting}[language=bash,caption={Enable cron logging in the target container}]
+docker exec soc-target bash -c '
+  sed -i "s/^#cron\.\*/cron.*/" /etc/rsyslog.d/50-default.conf
+  pkill -x rsyslogd; sleep 1; rsyslogd
+  service cron start'
+\end{lstlisting}
+
+The repository has no script that writes the per-technique evidence files.
+The following uses the harness classes that compute the reported measures; the
+sleep must exceed the post-attack buffer (15\,s by default, 65\,s for
+T1053.003). We verified the class and method signatures but did not execute
+this snippet, since doing so would be a new run.
+
+\begin{lstlisting}[language=bash,caption={Run one technique and compute its measures}]
+python - <<'EOF'
+import time
+from benchmark.runner import AttackRunner
+from benchmark.collector import AlertCollector
+from benchmark.metrics import MetricsCalculator
+
+tid = "T1136.001"
+results = AttackRunner().run_single_technique(tid)
+time.sleep(20)   # use 70 for T1053.003
+print(MetricsCalculator(AlertCollector()).calculate_technique_metrics(tid, results))
+EOF
+\end{lstlisting}
+
+\subsection{Test Suite}
+
+The suite contains 60 tests, all of which passed when re-run on 2026-10-13.
+They replace Elasticsearch with mocks and cover timestamp conversion,
+collection-window buffers, keyword matching logic, measure calculation, and
+result serialization. They test the harness code; they do not test whether
+evidence appears in the lab.
+
+\subsection{Artifacts}
+
+\begin{itemize}
+    \item \texttt{results/validation\_20261010\_125751.json}: T1136.001,
+    observed.
+    \item \texttt{results/t1053003\_65s\_window\_20261010\_140043.json}:
+    T1053.003, 65\,s window, observed.
+    \item \texttt{results/t1053003\_validation\_20261010\_132113.json}:
+    T1053.003, 15\,s window, not observed.
+    \item \texttt{results/t1053003\_telemetry\_blocker.json} and
+    \texttt{results/t1053003\_telemetry\_enabled.json}: cron logging before
+    and after manual setup.
+    \item \texttt{results/report\_20261010\_*.json}: the four pilot runs.
+\end{itemize}
+
+The repository has not been published at a public address.
+% AUTHOR: add the repository URL and a commit or archive identifier when available.
+
+\section{Conclusion}
+
+We set out to benchmark detection rules in a containerized lab and instead
+measured whether log evidence arrived at all. Evidence was observed for 2 of
+11 planned techniques, in one run each: local account creation after 3.20\,s
+and cron persistence after 30.94\,s, the latter only once the post-attack
+window was extended from 15\,s to 65\,s. The other 9 techniques were not
+evaluated after the harness was corrected, because the audit daemon did not
+run in the container; we attribute this to the kernel accepting audit control
+only from the initial PID namespace. No detection rule was executed, no
+false-positive baseline was
+measured, and no run was repeated. The useful results are the reasons for
+these outcomes: telemetry preconditions should be verified before attacks are
+run, collection windows should follow the logging mechanism of each technique,
+and each result should store the matched events so that attribution can be
+checked.
+
+\section*{Declarations}
+
+\paragraph{Use of AI tools.}
+AI assistance was used for the literature search, for checking the claims in
+this report against the repository, and for editing the text.
+% AUTHOR: after you have reviewed the paper, add your own statement of review
+% and responsibility here. It was removed because it must be made by you.
+% AUTHOR: adjust this statement to match your actual use and the venue's policy.
+% AUTHOR: add funding, conflict-of-interest, and author-contribution statements
+% as the venue requires. They were not drafted because the facts are yours to state.
+
+% ---------------------------------------------------------------------------
+% References. Entries are grouped: peer-reviewed research; preprints;
+% technical reports, documentation, and source code. Volume and page details
+% were not verified and are omitted. AUTHOR: read each source before
+% submission; see the revision audit for which summaries rest on abstracts only.
+% ---------------------------------------------------------------------------
+\begin{thebibliography}{99}
+
+% --- Peer-reviewed research ---
+
+\bibitem{alahmadi2022}
+B.~A. Alahmadi, L.~Axon, and I.~Martinovic.
+\newblock 99\% False Positives: A Qualitative Study of {SOC} Analysts'
+  Perspectives on Security Alarms.
+\newblock In \emph{31st USENIX Security Symposium}, 2022.
+\newblock \url{https://www.usenix.org/conference/usenixsecurity22/presentation/alahmadi}
+
+\bibitem{applebaum2016}
+A.~Applebaum, D.~Miller, B.~Strom, C.~Korban, and R.~Wolf.
+\newblock Intelligent, Automated Red Team Emulation.
+\newblock In \emph{Annual Computer Security Applications Conference (ACSAC)},
+  2016.
+\newblock \url{https://doi.org/10.1145/2991079.2991111}
+
+\bibitem{axelsson2000}
+S.~Axelsson.
+\newblock The Base-Rate Fallacy and the Difficulty of Intrusion Detection.
+\newblock \emph{ACM Transactions on Information and System Security}, 2000.
+\newblock \url{https://doi.org/10.1145/357830.357849}
+
+\bibitem{brown2001}
+L.~D. Brown, T.~T. Cai, and A.~DasGupta.
+\newblock Interval Estimation for a Binomial Proportion.
+\newblock \emph{Statistical Science}, 2001.
+\newblock \url{https://doi.org/10.1214/ss/1009213286}
+
+\bibitem{chen2021}
+X.~Chen, H.~Irshad, Y.~Chen, A.~Gehani, and V.~Yegneswaran.
+\newblock {CLARION}: Sound and Clear Provenance Tracking for Microservice
+  Deployments.
+\newblock In \emph{30th USENIX Security Symposium}, 2021.
+\newblock \url{https://www.usenix.org/conference/usenixsecurity21/presentation/chen-xutong}
+
+\bibitem{collberg2016}
+C.~Collberg and T.~A. Proebsting.
+\newblock Repeatability in Computer Systems Research.
+\newblock \emph{Communications of the ACM}, 2016.
+\newblock \url{https://doi.org/10.1145/2812803}
+
+\bibitem{kokulu2019}
+F.~B. Kokulu, A.~Soneji, T.~Bao, Y.~Shoshitaishvili, Z.~Zhao, A.~Doup\'e, and
+  G.-J. Ahn.
+\newblock Matched and Mismatched {SOCs}: A Qualitative Study on Security
+  Operations Center Issues.
+\newblock In \emph{ACM SIGSAC Conference on Computer and Communications
+  Security (CCS)}, 2019.
+\newblock \url{https://doi.org/10.1145/3319535.3354239}
+
+\bibitem{landauer2021}
+M.~Landauer, F.~Skopik, M.~Wurzenberger, W.~Hotwagner, and A.~Rauber.
+\newblock Have it Your Way: Generating Customized Log Datasets With a
+  Model-Driven Simulation Testbed.
+\newblock \emph{IEEE Transactions on Reliability}, published online 2020.
+\newblock \url{https://doi.org/10.1109/TR.2020.3031317}
+
+\bibitem{landauer2022}
+M.~Landauer, F.~Skopik, M.~Frank, W.~Hotwagner, M.~Wurzenberger, and
+  A.~Rauber.
+\newblock Maintainable Log Datasets for Evaluation of Intrusion Detection
+  Systems.
+\newblock \emph{IEEE Transactions on Dependable and Secure Computing},
+  published online 2022.
+\newblock \url{https://doi.org/10.1109/TDSC.2022.3201582}
+
+\bibitem{lim2021}
+S.~Y. Lim, B.~Stelea, X.~Han, and T.~Pasquier.
+\newblock Secure Namespaced Kernel Audit for Containers.
+\newblock In \emph{ACM Symposium on Cloud Computing (SoCC)}, 2021.
+\newblock \url{https://doi.org/10.1145/3472883.3486976}
+
+\bibitem{mchugh2000}
+J.~McHugh.
+\newblock Testing Intrusion Detection Systems: A Critique of the 1998 and 1999
+  {DARPA} Intrusion Detection System Evaluations as Performed by Lincoln
+  Laboratory.
+\newblock \emph{ACM Transactions on Information and System Security}, 2000.
+\newblock \url{https://doi.org/10.1145/382912.382923}
+
+\bibitem{shen2024}
+X.~Shen, Z.~Li, G.~Burleigh, L.~Wang, and Y.~Chen.
+\newblock Decoding the {MITRE} Engenuity {ATT\&CK} Enterprise Evaluation: An
+  Analysis of {EDR} Performance in Real-World Environments.
+\newblock In \emph{ACM Asia Conference on Computer and Communications Security
+  (ASIA CCS)}, 2024.
+\newblock \url{https://doi.org/10.1145/3634737.3645012}
+
+\bibitem{uetz2021}
+R.~Uetz, C.~Hemminghaus, L.~Hackl\"ander, P.~Schlipper, and M.~Henze.
+\newblock Reproducible and Adaptable Log Data Generation for Sound
+  Cybersecurity Experiments.
+\newblock In \emph{Annual Computer Security Applications Conference (ACSAC)},
+  2021.
+\newblock \url{https://doi.org/10.1145/3485832.3488020}
+
+\bibitem{uetz2024}
+R.~Uetz, M.~Herzog, L.~Hackl\"ander, S.~Schwarz, and M.~Henze.
+\newblock You Cannot Escape Me: Detecting Evasions of {SIEM} Rules in
+  Enterprise Networks.
+\newblock In \emph{33rd USENIX Security Symposium}, 2024.
+\newblock \url{https://www.usenix.org/conference/usenixsecurity24/presentation/uetz}
+
+\bibitem{vanderkouwe2019}
+E.~van~der Kouwe, G.~Heiser, D.~Andriesse, H.~Bos, and C.~Giuffrida.
+\newblock {SoK}: Benchmarking Flaws in Systems Security.
+\newblock In \emph{IEEE European Symposium on Security and Privacy
+  (EuroS\&P)}, 2019.
+\newblock \url{https://doi.org/10.1109/EuroSP.2019.00031}
+
+\bibitem{vermeer2022}
+M.~Vermeer, M.~van Eeten, and C.~Ga\~n\'an.
+\newblock Ruling the Rules: Quantifying the Evolution of Rulesets, Alerts and
+  Incidents in Network Intrusion Detection.
+\newblock In \emph{ACM Asia Conference on Computer and Communications Security
+  (ASIA CCS)}, 2022.
+\newblock \url{https://doi.org/10.1145/3488932.3517412}
+
+\bibitem{vermeer2023}
+M.~Vermeer, N.~Kadenko, M.~van Eeten, C.~Ga\~n\'an, and S.~Parkin.
+\newblock Alert Alchemy: {SOC} Workflows and Decisions in the Management of
+  {NIDS} Rules.
+\newblock In \emph{ACM SIGSAC Conference on Computer and Communications
+  Security (CCS)}, 2023.
+\newblock \url{https://doi.org/10.1145/3576915.3616581}
+
+\bibitem{virkud2024}
+A.~Virkud, M.~A. Inam, A.~Riddle, J.~Liu, G.~Wang, and A.~Bates.
+\newblock How does Endpoint Detection use the {MITRE ATT\&CK} Framework?
+\newblock In \emph{33rd USENIX Security Symposium}, 2024.
+\newblock \url{https://www.usenix.org/conference/usenixsecurity24/presentation/virkud}
+
+% --- Preprints ---
+
+\bibitem{houssel2026}
+P.~R.~B. Houssel, O.~Levillain, S.~Laniepce, N.~Dejon, and H.~Debar.
+\newblock A Study of Kernel Telemetry Options for Security-Oriented
+  Provenance.
+\newblock arXiv:2608.11418, 2026. Preprint; the arXiv record states it was
+  accepted at ISC 2026.
+\newblock \url{https://arxiv.org/abs/2608.11418}
+
+\bibitem{long2026}
+M.~Long and D.~Evans.
+\newblock Evolution of Log-Based Detection Rules in Public Repositories.
+\newblock arXiv:2605.05383, 2026. Preprint, not peer reviewed.
+\newblock \url{https://arxiv.org/abs/2605.05383}
+
+\bibitem{shukla2025}
+A.~Shukla, P.~A. Gandhi, Y.~Elovici, and A.~Shabtai.
+\newblock {RuleGenie}: {SIEM} Detection Rule Set Optimization.
+\newblock arXiv:2505.06701, 2025. Preprint, not peer reviewed.
+\newblock \url{https://arxiv.org/abs/2505.06701}
+
+% --- Technical reports, documentation, and source code ---
+
+\bibitem{attack-design}
+The MITRE Corporation.
+\newblock {MITRE ATT\&CK}: Design and Philosophy.
+\newblock Technical report, revised March 2020.
+\newblock \url{https://attack.mitre.org/docs/ATTACK_Design_and_Philosophy_March_2020.pdf}
+
+\bibitem{attack-evals}
+The MITRE Corporation.
+\newblock {ATT\&CK} Evaluations.
+\newblock Project website.
+\newblock \url{https://evals.mitre.org/}
+
+\bibitem{atomic}
+Red Canary.
+\newblock Atomic Red Team.
+\newblock Software repository and documentation.
+\newblock \url{https://github.com/redcanaryco/atomic-red-team}
+
+\bibitem{cron-man}
+Ubuntu Manpage Repository.
+\newblock cron(8), Ubuntu 22.04 (jammy).
+\newblock Documentation.
+\newblock \url{https://manpages.ubuntu.com/manpages/jammy/man8/cron.8.html}
+
+\bibitem{linux-audit}
+Linux kernel developers.
+\newblock \texttt{kernel/audit.c}, function \texttt{audit\_netlink\_ok}.
+\newblock Source code.
+\newblock \url{https://github.com/torvalds/linux/blob/master/kernel/audit.c}
+
+\bibitem{pysigma}
+SigmaHQ.
+\newblock pySigma.
+\newblock Software repository.
+\newblock \url{https://github.com/SigmaHQ/pySigma}
+
+\bibitem{sigma-spec}
+SigmaHQ.
+\newblock Sigma Specification: Generic Signature Format for {SIEM} Systems.
+\newblock Specification repository.
+\newblock \url{https://github.com/SigmaHQ/sigma-specification}
+
+\end{thebibliography}
+
+\end{document}

@@ -1,0 +1,34 @@
+title: Shell History Cleared or Disabled
+id: 6f708192-6789-abcd-ef01-234567890123
+status: experimental
+description: Detects attempts to clear or disable shell command history
+references:
+    - https://attack.mitre.org/techniques/T1070/003/
+author: SOC Detection Benchmark
+date: 2024/01/15
+tags:
+    - attack.defense_evasion
+    - attack.t1070.003
+logsource:
+    product: linux
+    service: auditd
+detection:
+    selection_history_file:
+        type:
+            - SYSCALL
+            - PATH
+        name|contains: '.bash_history'
+    selection_unset:
+        type: EXECVE
+        a0|endswith: '/bash'
+        a1|contains: 'HISTFILE'
+    condition: selection_history_file or selection_unset
+fields:
+    - exe
+    - name
+    - pid
+    - uid
+falsepositives:
+    - Manual history management
+    - Privacy-conscious users
+level: medium

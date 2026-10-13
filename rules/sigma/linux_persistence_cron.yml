@@ -1,0 +1,30 @@
+title: Cron Job Creation or Modification
+id: 2b3c4d5e-2345-6789-abcd-ef0123456789
+status: experimental
+description: Detects modification of cron configuration files
+references:
+    - https://attack.mitre.org/techniques/T1053/003/
+author: SOC Detection Benchmark
+date: 2024/01/15
+tags:
+    - attack.persistence
+    - attack.t1053.003
+logsource:
+    product: linux
+    service: auditd
+detection:
+    selection:
+        type:
+            - SYSCALL
+            - PATH
+        key: cron_mod
+    condition: selection
+fields:
+    - name
+    - exe
+    - pid
+    - uid
+falsepositives:
+    - Legitimate cron administration
+    - Package updates
+level: medium

@@ -1,0 +1,35 @@
+title: SUID/SGID Bit Set on File
+id: 4d5e6f70-4567-89ab-cdef-012345678901
+status: experimental
+description: Detects setting of SUID or SGID bit on files
+references:
+    - https://attack.mitre.org/techniques/T1548/001/
+author: SOC Detection Benchmark
+date: 2024/01/15
+tags:
+    - attack.privilege_escalation
+    - attack.t1548.001
+logsource:
+    product: linux
+    service: auditd
+detection:
+    selection:
+        type: SYSCALL
+        syscall:
+            - chmod
+            - fchmod
+            - fchmodat
+        a1|contains:
+            - '4'
+            - '2'
+    condition: selection
+fields:
+    - exe
+    - name
+    - a1
+    - pid
+    - uid
+falsepositives:
+    - Package installation
+    - System configuration
+level: high

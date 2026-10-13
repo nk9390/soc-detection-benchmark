@@ -1,0 +1,43 @@
+{
+  "technique_id": "T1053.003",
+  "technique_name": "Cron",
+  "investigation_time": "2026-10-10T18:30:00",
+  "investigation_result": "TELEMETRY_UNAVAILABLE",
+  "attack_executed": false,
+  "reason": "Telemetry prerequisites not met; running attack would produce no detectable evidence",
+  "telemetry_checks": {
+    "cron_daemon_running": {
+      "check": "service cron status",
+      "result": "cron is not running",
+      "status": "FAILED"
+    },
+    "cron_log_exists": {
+      "check": "ls /var/log/cron.log",
+      "result": "No such file or directory",
+      "status": "FAILED"
+    },
+    "rsyslog_cron_config": {
+      "check": "grep cron /etc/rsyslog.d/50-default.conf",
+      "result": "#cron.* /var/log/cron.log (commented out)",
+      "status": "FAILED"
+    },
+    "elasticsearch_cron_docs": {
+      "check": "ES query for cron/crontab in message field",
+      "result": "0 documents",
+      "status": "FAILED"
+    }
+  },
+  "planned_attack": {
+    "command": "echo \"* * * * * root /tmp/malicious.sh\" >> /etc/crontab",
+    "cleanup": "sed -i '/malicious.sh/d' /etc/crontab",
+    "expected_log_source": "cron.log or syslog",
+    "detection_keys": ["cron_mod", "crontab"]
+  },
+  "blocker_summary": "T1053.003 cannot be tested because: (1) cron daemon is not running in the target container, (2) rsyslog cron logging is disabled, (3) no cron.log file exists, (4) zero cron-related documents are indexed in Elasticsearch. The attack would successfully modify /etc/crontab but generate no log entries for detection.",
+  "remediation_options": [
+    "Start cron daemon in target container: service cron start",
+    "Enable cron logging in rsyslog: uncomment 'cron.*' line in /etc/rsyslog.d/50-default.conf",
+    "Restart rsyslog after config change",
+    "Or: Use VM-based environment where cron logging is enabled by default"
+  ]
+}

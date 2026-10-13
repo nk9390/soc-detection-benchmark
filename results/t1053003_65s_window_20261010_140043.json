@@ -1,0 +1,25 @@
+{
+  "technique_id": "T1053.003",
+  "technique_name": "Cron",
+  "validation_time": "2026-10-10T08:30:43.516110+00:00",
+  "window_config": {
+    "pre_buffer_seconds": 1,
+    "post_buffer_seconds": 65
+  },
+  "attack": {
+    "command": "echo \"* * * * * root /tmp/malicious.sh\" >> /etc/crontab",
+    "success": true,
+    "start_time_utc": "2026-10-10T08:29:33.294397Z",
+    "end_time_utc": "2026-10-10T08:29:33.319812Z"
+  },
+  "cleanup": {
+    "verified_independently": true
+  },
+  "detection": {
+    "result": "DETECTED",
+    "tests_detected": 1,
+    "alert_count": 2,
+    "detection_rate": 1.0,
+    "mean_ttd_seconds": 30.944603
+  }
+}

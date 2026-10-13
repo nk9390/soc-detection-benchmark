@@ -1,0 +1,64 @@
+{
+  "technique_id": "T1053.003",
+  "technique_name": "Cron",
+  "validation_time": "2026-10-10T07:51:13Z",
+  "attack": {
+    "command": "echo \"* * * * * root /tmp/malicious.sh\" >> /etc/crontab",
+    "success": true,
+    "exit_code": 0,
+    "start_time_local": "2026-10-10T13:16:37.022593",
+    "end_time_local": "2026-10-10T13:16:37.042619",
+    "start_time_utc": "2026-10-10T07:46:37.022593Z",
+    "end_time_utc": "2026-10-10T07:46:37.042619Z",
+    "output": "",
+    "error": ""
+  },
+  "cleanup": {
+    "command": "sed -i '/malicious.sh/d' /etc/crontab",
+    "verified_independently": true,
+    "malicious_sh_present": false,
+    "crontab_clean": true
+  },
+  "collection_window": {
+    "start_utc": "2026-10-10T07:46:36.022593Z",
+    "end_utc": "2026-10-10T07:46:52.042619Z",
+    "pre_buffer_seconds": 1,
+    "post_buffer_seconds": 15,
+    "duration_seconds": 16.0
+  },
+  "detection": {
+    "result": "NOT_DETECTED",
+    "detection_keys": [
+      "cron_mod",
+      "crontab"
+    ],
+    "documents_in_window": 0,
+    "documents_in_wide_window": 2
+  },
+  "diagnosis": {
+    "failure_category": "event_generation_timing",
+    "explanation": "Cron daemon checks crontab once per minute at :01 seconds. Attack at :37 generated RELOAD at :01 of next minute (24s delay), outside 15s collection window.",
+    "cron_reload_timestamp": "2026-10-10T07:47:01 UTC (estimated)",
+    "es_document_timestamp": "2026-10-10T07:49:44.847Z",
+    "actual_ttd_seconds": "N/A (not detected in window)",
+    "estimated_ttd_if_window_extended": 24
+  },
+  "raw_es_documents": [
+    {
+      "@timestamp": "2026-10-10T07:49:44.847Z",
+      "log_type": "cron",
+      "message": "Oct 10 07:49:01 a5488de94bee cron[1958]: message repeated 2 times: [ (*system*) RELOAD (/etc/crontab)]"
+    }
+  ],
+  "pre_execution_state": {
+    "cron_running": true,
+    "cron_logging_enabled": true,
+    "crontab_clean": true,
+    "malicious_sh_exists": false
+  },
+  "post_execution_state": {
+    "crontab_clean": true,
+    "malicious_sh_exists": false,
+    "cleanup_success": true
+  }
+}

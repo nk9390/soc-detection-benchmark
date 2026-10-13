@@ -1,0 +1,59 @@
+{
+  "phase": "telemetry_setup",
+  "technique_id": "T1053.003",
+  "timestamp": "2026-10-10T07:41:00Z",
+  "result": "SUCCESS",
+  "setup_actions": [
+    {
+      "action": "Enable cron logging in rsyslog",
+      "command": "sed -i 's/#cron\\.*/cron.*/' /etc/rsyslog.d/50-default.conf",
+      "result": "cron.* /var/log/cron.log (uncommented)"
+    },
+    {
+      "action": "Restart rsyslog",
+      "command": "killall rsyslogd; rsyslogd",
+      "result": "rsyslog restarted successfully"
+    },
+    {
+      "action": "Start cron daemon",
+      "command": "service cron start",
+      "result": "cron is running"
+    }
+  ],
+  "persistence_assessment": {
+    "log_files": "PERSIST (Docker volume target-logs)",
+    "rsyslog_config": "LOST on container recreation (container filesystem)",
+    "cron_daemon_state": "LOST on container restart (runtime process)",
+    "conclusion": "Temporary setup for validation; requires Dockerfile/entrypoint.sh changes for permanence"
+  },
+  "path_alignment": {
+    "rsyslog_output": "/var/log/cron.log",
+    "filebeat_input": "/var/log/target/cron.log",
+    "volume_mapping": "target:/var/log -> filebeat:/var/log/target",
+    "status": "ALIGNED"
+  },
+  "verification": {
+    "local_log": {
+      "file": "/var/log/cron.log",
+      "exists": true,
+      "sample_entries": [
+        "Oct 10 07:40:36 a5488de94bee cron[1958]: (CRON) STARTUP (fork ok)",
+        "Oct 10 07:40:54 a5488de94bee crontab[1984]: (root) REPLACE (root)",
+        "Oct 10 07:41:01 a5488de94bee cron[1958]: (*system*) RELOAD (/etc/crontab)"
+      ]
+    },
+    "elasticsearch": {
+      "query": {"match": {"log_type": "cron"}},
+      "total_documents": 7,
+      "sample_document": {
+        "@timestamp": "2026-10-10T07:41:02.754Z",
+        "log_type": "cron",
+        "message": "Oct 10 07:41:01 a5488de94bee cron[1958]: (*system*) RELOAD (/etc/crontab)"
+      }
+    }
+  },
+  "cleanup": {
+    "test_crontab_removed": true,
+    "test_comment_removed": true
+  }
+}

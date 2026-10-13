@@ -1,0 +1,62 @@
+filebeat.inputs:
+  # Auditd logs
+  - type: log
+    enabled: true
+    paths:
+      - /var/log/target/audit/audit.log
+    fields:
+      log_type: auditd
+    fields_under_root: true
+    multiline:
+      pattern: '^type='
+      negate: true
+      match: after
+    processors:
+      - dissect:
+          tokenizer: 'type=%{audit_type} msg=audit(%{audit_timestamp}): %{audit_message}'
+          field: message
+          target_prefix: audit
+
+  # Auth logs (login events, sudo, etc.)
+  - type: log
+    enabled: true
+    paths:
+      - /var/log/target/auth.log
+    fields:
+      log_type: auth
+    fields_under_root: true
+
+  # Syslog
+  - type: log
+    enabled: true
+    paths:
+      - /var/log/target/syslog
+    fields:
+      log_type: syslog
+    fields_under_root: true
+
+  # Cron logs
+  - type: log
+    enabled: true
+    paths:
+      - /var/log/target/cron.log
+    fields:
+      log_type: cron
+    fields_under_root: true
+
+output.elasticsearch:
+  hosts: ["elasticsearch:9200"]
+  index: "soc-benchmark-%{+yyyy.MM.dd}"
+
+setup.template:
+  name: "soc-benchmark"
+  pattern: "soc-benchmark-*"
+  settings:
+    number_of_shards: 1
+    number_of_replicas: 0
+
+setup.ilm.enabled: false
+
+logging.level: info
+logging.to_files: false
+logging.to_stderr: true

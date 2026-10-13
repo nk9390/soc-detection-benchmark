@@ -1,0 +1,40 @@
+title: File Download via Command Line
+id: 92031425-9abc-def0-1234-567890123456
+status: experimental
+description: Detects file downloads using common command-line tools
+references:
+    - https://attack.mitre.org/techniques/T1105/
+author: SOC Detection Benchmark
+date: 2024/01/15
+tags:
+    - attack.command_and_control
+    - attack.t1105
+logsource:
+    product: linux
+    service: auditd
+detection:
+    selection_curl:
+        type: EXECVE
+        a0|endswith: '/curl'
+        a1|contains:
+            - '-o'
+            - '-O'
+            - '--output'
+    selection_wget:
+        type: EXECVE
+        a0|endswith: '/wget'
+    selection_fetch:
+        type: EXECVE
+        a0|endswith: '/fetch'
+    condition: selection_curl or selection_wget or selection_fetch
+fields:
+    - exe
+    - a0
+    - a1
+    - a2
+    - pid
+    - uid
+falsepositives:
+    - Package managers
+    - Legitimate downloads
+level: low

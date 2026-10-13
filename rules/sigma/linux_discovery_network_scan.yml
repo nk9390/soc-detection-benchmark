@@ -1,0 +1,36 @@
+title: Network Scanning Activity
+id: 81920314-89ab-cdef-0123-456789012345
+status: experimental
+description: Detects network scanning tools and activities
+references:
+    - https://attack.mitre.org/techniques/T1018/
+author: SOC Detection Benchmark
+date: 2024/01/15
+tags:
+    - attack.discovery
+    - attack.t1018
+logsource:
+    product: linux
+    service: auditd
+detection:
+    selection_nmap:
+        type: EXECVE
+        a0|endswith: '/nmap'
+    selection_masscan:
+        type: EXECVE
+        a0|endswith: '/masscan'
+    selection_socket_scan:
+        type: SYSCALL
+        syscall: socket
+        key: network_socket
+    condition: selection_nmap or selection_masscan or selection_socket_scan
+fields:
+    - exe
+    - a0
+    - a1
+    - pid
+    - uid
+falsepositives:
+    - Legitimate network administration
+    - Security assessments
+level: medium

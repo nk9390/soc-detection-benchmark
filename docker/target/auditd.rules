@@ -1,0 +1,80 @@
+# SOC Detection Benchmark - Auditd Rules
+# Comprehensive logging for attack detection
+
+# Remove any existing rules
+-D
+
+# Buffer Size
+-b 8192
+
+# Failure Mode
+-f 1
+
+# ============================================
+# Process Execution (T1059 - Command and Scripting Interpreter)
+# ============================================
+-a always,exit -F arch=b64 -S execve -k exec
+-a always,exit -F arch=b32 -S execve -k exec
+
+# ============================================
+# File Operations (T1070 - Indicator Removal)
+# ============================================
+-a always,exit -F arch=b64 -S unlink,unlinkat,rename,renameat -k file_delete
+-a always,exit -F arch=b32 -S unlink,unlinkat,rename,renameat -k file_delete
+
+# ============================================
+# Scheduled Tasks (T1053 - Scheduled Task/Job)
+# ============================================
+-w /etc/crontab -p wa -k cron_mod
+-w /etc/cron.d/ -p wa -k cron_mod
+-w /etc/cron.daily/ -p wa -k cron_mod
+-w /etc/cron.hourly/ -p wa -k cron_mod
+-w /var/spool/cron/ -p wa -k cron_mod
+
+# ============================================
+# User/Group Changes (T1136 - Create Account)
+# ============================================
+-w /etc/passwd -p wa -k user_mod
+-w /etc/shadow -p wa -k user_mod
+-w /etc/group -p wa -k group_mod
+-w /etc/gshadow -p wa -k group_mod
+-w /usr/sbin/useradd -p x -k user_add
+-w /usr/sbin/adduser -p x -k user_add
+
+# ============================================
+# Privilege Escalation (T1548 - Abuse Elevation Control)
+# ============================================
+-a always,exit -F arch=b64 -S setuid,setgid,setreuid,setregid -k priv_esc
+-a always,exit -F arch=b32 -S setuid,setgid,setreuid,setregid -k priv_esc
+-w /etc/sudoers -p wa -k sudoers_mod
+-w /etc/sudoers.d/ -p wa -k sudoers_mod
+
+# ============================================
+# Network Connections (T1071/T1571 - Application Layer Protocol)
+# ============================================
+-a always,exit -F arch=b64 -S connect -k network_connect
+-a always,exit -F arch=b32 -S connect -k network_connect
+-a always,exit -F arch=b64 -S socket -k network_socket
+-a always,exit -F arch=b32 -S socket -k network_socket
+
+# ============================================
+# Shell History (T1070.003 - Clear Command History)
+# ============================================
+-w /home/ -p wa -k shell_history
+-w /root/.bash_history -p wa -k shell_history
+
+# ============================================
+# Kernel Module Loading (T1547.006 - Kernel Modules)
+# ============================================
+-a always,exit -F arch=b64 -S init_module,finit_module -k kernel_mod
+-a always,exit -F arch=b32 -S init_module,finit_module -k kernel_mod
+
+# ============================================
+# System Information Discovery (T1082)
+# ============================================
+-w /etc/hostname -p r -k sys_info
+-w /etc/os-release -p r -k sys_info
+-w /proc/version -p r -k sys_info
+
+# Make configuration immutable (must be last)
+-e 2

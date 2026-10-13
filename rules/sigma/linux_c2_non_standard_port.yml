@@ -1,0 +1,37 @@
+title: Connection to Non-Standard Port
+id: a3142536-abcd-ef01-2345-678901234567
+status: experimental
+description: Detects outbound connections to suspicious ports
+references:
+    - https://attack.mitre.org/techniques/T1571/
+author: SOC Detection Benchmark
+date: 2024/01/15
+tags:
+    - attack.command_and_control
+    - attack.t1571
+logsource:
+    product: linux
+    service: auditd
+detection:
+    selection_netcat:
+        type: EXECVE
+        a0|endswith:
+            - '/nc'
+            - '/netcat'
+            - '/ncat'
+    selection_connect:
+        type: SYSCALL
+        syscall: connect
+        key: network_connect
+    condition: selection_netcat or selection_connect
+fields:
+    - exe
+    - a0
+    - a1
+    - a2
+    - pid
+    - uid
+falsepositives:
+    - Legitimate network testing
+    - Service health checks
+level: medium

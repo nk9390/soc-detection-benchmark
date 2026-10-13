@@ -1,0 +1,49 @@
+[project]
+name = "soc-detection-benchmark"
+version = "1.0.0"
+description = "Reproducible security monitoring lab to evaluate detection rules"
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+authors = [
+    {name = "SOC Detection Benchmark"}
+]
+dependencies = [
+    "elasticsearch>=8.12.0,<9.0.0",
+    "pyyaml>=6.0",
+    "docker>=7.0.0",
+    "rich>=13.7.0",
+    "click>=8.1.0",
+    "pandas>=2.1.0",
+    "jinja2>=3.1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "black>=24.1.0",
+    "ruff>=0.1.0",
+]
+
+[project.scripts]
+soc-benchmark = "benchmark.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["benchmark"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.black]
+line-length = 100
+target-version = ["py311"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

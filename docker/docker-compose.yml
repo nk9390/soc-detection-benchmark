@@ -1,0 +1,72 @@
+services:
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.12.0
+    container_name: soc-elasticsearch
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - xpack.security.enrollment.enabled=false
+      - "ES_JAVA_OPTS=-Xms1g -Xmx1g"
+    ports:
+      - "9200:9200"
+    volumes:
+      - es-data:/usr/share/elasticsearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s http://localhost:9200/_cluster/health | grep -q 'green\\|yellow'"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+    networks:
+      - soc-net
+
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.12.0
+    container_name: soc-kibana
+    environment:
+      - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
+      - xpack.security.enabled=false
+    ports:
+      - "5601:5601"
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    networks:
+      - soc-net
+
+  filebeat:
+    image: docker.elastic.co/beats/filebeat:8.12.0
+    container_name: soc-filebeat
+    user: root
+    volumes:
+      - ./filebeat/filebeat.yml:/usr/share/filebeat/filebeat.yml:ro
+      - target-logs:/var/log/target:ro
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    networks:
+      - soc-net
+    command: filebeat -e -strict.perms=false
+
+  target:
+    build:
+      context: ./target
+      dockerfile: Dockerfile
+    container_name: soc-target
+    privileged: true
+    volumes:
+      - target-logs:/var/log
+      - ../attacks:/attacks:ro
+    depends_on:
+      - filebeat
+    networks:
+      - soc-net
+    tty: true
+    stdin_open: true
+
+volumes:
+  es-data:
+  target-logs:
+
+networks:
+  soc-net:
+    driver: bridge
